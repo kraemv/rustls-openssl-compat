@@ -15,6 +15,7 @@ log = "0.4"
 openssl-probe = "0.2"
 openssl-sys = "0.9"
 rustls = "0.23.31"
+rustls-libcrux-provider = { version = "0.0.1", path = "../rustls-libcrux/libcrux-provider" }
 
 [dev-dependencies]
 pretty_assertions = "1"

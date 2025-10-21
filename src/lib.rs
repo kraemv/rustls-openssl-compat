@@ -11,9 +11,10 @@ use openssl_sys::{
     EVP_PKEY, SSL_ERROR_NONE, SSL_ERROR_SSL, SSL_ERROR_WANT_READ, SSL_ERROR_WANT_WRITE, X509,
     X509_STORE, X509_V_ERR_UNSPECIFIED,
 };
-
+use rustls_libcrux_provider as provider;
+use rustls::crypto::aws_lc_rs::Ticketer;
 use rustls::client::Resumption;
-use rustls::crypto::{aws_lc_rs as provider, SupportedKxGroup};
+use rustls::crypto::SupportedKxGroup;
 use rustls::pki_types::{CertificateDer, ServerName};
 use rustls::server::{Accepted, Acceptor, ProducesTickets};
 use rustls::{
@@ -107,6 +108,7 @@ pub struct SslCipher {
 impl SslCipher {
     pub fn find_by_id(id: CipherSuite) -> Option<&'static Self> {
         match id {
+            /*
             CipherSuite::TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256 => {
                 Some(&TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256)
             }
@@ -121,12 +123,12 @@ impl SslCipher {
             }
             CipherSuite::TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384 => {
                 Some(&TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384)
-            }
+            }*/
             CipherSuite::TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256 => {
                 Some(&TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256)
             }
-            CipherSuite::TLS13_AES_128_GCM_SHA256 => Some(&TLS13_AES_128_GCM_SHA256),
-            CipherSuite::TLS13_AES_256_GCM_SHA384 => Some(&TLS13_AES_256_GCM_SHA384),
+            /*CipherSuite::TLS13_AES_128_GCM_SHA256 => Some(&TLS13_AES_128_GCM_SHA256),
+            CipherSuite::TLS13_AES_256_GCM_SHA384 => Some(&TLS13_AES_256_GCM_SHA384),*/
             CipherSuite::TLS13_CHACHA20_POLY1305_SHA256 => Some(&TLS13_CHACHA20_POLY1305_SHA256),
             _ => None,
         }
@@ -141,8 +143,8 @@ impl SslCipher {
     }
 }
 
-static TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256: SslCipher = SslCipher {
-    rustls: &provider::cipher_suite::TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+/*static TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256: SslCipher = SslCipher {
+    rustls: &provider::TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
     auth: constants::NID_AUTH_ECDSA,
     kx: constants::NID_KX_ECDHE,
     bits: 128,
@@ -153,7 +155,7 @@ static TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256: SslCipher = SslCipher {
 };
 
 static TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384: SslCipher = SslCipher {
-    rustls: &provider::cipher_suite::TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+    rustls: &provider::provider()::cipher_suites::TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
     auth: constants::NID_AUTH_ECDSA,
     kx: constants::NID_KX_ECDHE,
     bits: 256,
@@ -164,7 +166,7 @@ static TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384: SslCipher = SslCipher {
 };
 
 static TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256: SslCipher = SslCipher {
-    rustls: &provider::cipher_suite::TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
+    rustls: &provider::provider()::cipher_suites::TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
     auth: constants::NID_AUTH_ECDSA,
     kx: constants::NID_KX_ECDHE,
     bits: 256,
@@ -175,7 +177,7 @@ static TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256: SslCipher = SslCipher {
 };
 
 static TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256: SslCipher = SslCipher {
-    rustls: &provider::cipher_suite::TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+    rustls: &provider::provider()::cipher_suites::TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
     auth: constants::NID_AUTH_RSA,
     kx: constants::NID_KX_ECDHE,
     bits: 128,
@@ -186,7 +188,7 @@ static TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256: SslCipher = SslCipher {
 };
 
 static TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384: SslCipher = SslCipher {
-    rustls: &provider::cipher_suite::TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+    rustls: &provider::provider()::cipher_suites::TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
     auth: constants::NID_AUTH_RSA,
     kx: constants::NID_KX_ECDHE,
     bits: 256,
@@ -195,9 +197,10 @@ static TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384: SslCipher = SslCipher {
     version: c"TLSv1.2",
     description: c"ECDHE-RSA-AES256-GCM-SHA384    TLSv1.2 Kx=ECDH     Au=RSA   Enc=AESGCM(256)            Mac=AEAD\n",
 };
+*/
 
 static TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256: SslCipher = SslCipher {
-    rustls: &provider::cipher_suite::TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
+    rustls: &provider::TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
     auth: constants::NID_AUTH_RSA,
     kx: constants::NID_KX_ECDHE,
     bits: 256,
@@ -207,8 +210,9 @@ static TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256: SslCipher = SslCipher {
     description: c"ECDHE-RSA-CHACHA20-POLY1305    TLSv1.2 Kx=ECDH     Au=RSA   Enc=CHACHA20/POLY1305(256) Mac=AEAD\n",
 };
 
+/*
 static TLS13_AES_128_GCM_SHA256: SslCipher = SslCipher {
-    rustls: &provider::cipher_suite::TLS13_AES_128_GCM_SHA256,
+    rustls: &provider::provider()::cipher_suites::TLS13_AES_128_GCM_SHA256,
     auth: constants::NID_AUTH_ANY,
     kx: constants::NID_KX_ANY,
     bits: 128,
@@ -219,7 +223,7 @@ static TLS13_AES_128_GCM_SHA256: SslCipher = SslCipher {
 };
 
 static TLS13_AES_256_GCM_SHA384: SslCipher = SslCipher {
-    rustls: &provider::cipher_suite::TLS13_AES_256_GCM_SHA384,
+    rustls: &provider::provider()::cipher_suites::TLS13_AES_256_GCM_SHA384,
     auth: constants::NID_AUTH_ANY,
     kx: constants::NID_KX_ANY,
     bits: 256,
@@ -228,9 +232,10 @@ static TLS13_AES_256_GCM_SHA384: SslCipher = SslCipher {
     version: c"TLSv1.3",
     description: c"TLS_AES_256_GCM_SHA384         TLSv1.3 Kx=any      Au=any   Enc=AESGCM(256)            Mac=AEAD\n",
 };
+*/
 
 static TLS13_CHACHA20_POLY1305_SHA256: SslCipher = SslCipher {
-    rustls: &provider::cipher_suite::TLS13_CHACHA20_POLY1305_SHA256,
+    rustls: &provider::TLS13_CHACHA20_POLY1305_SHA256,
     auth: constants::NID_AUTH_ANY,
     kx: constants::NID_KX_ANY,
     bits: 256,
@@ -470,7 +475,7 @@ impl SslContext {
         // a ticketer. Doing so is wasteful for a client, and incompatible with miri
         // (due to calls to a foreign function, `RAND_bytes`).
         let ticketer = match !method.server_versions.is_empty() && cfg!(not(miri)) {
-            true => provider::Ticketer::new().ok(),
+            true => Ticketer::new().ok(),
             false => None,
         };
         Self {
@@ -1124,7 +1129,7 @@ impl Ssl {
             None => ServerName::try_from("0.0.0.0").unwrap(),
         };
 
-        let provider = Arc::new(provider::default_provider());
+        let provider = Arc::new(provider::provider());
         let verifier = Arc::new(verifier::ServerVerifier::new(
             self.verify_x509_store.clone(),
             provider.clone(),
@@ -1209,7 +1214,7 @@ impl Ssl {
     }
 
     fn init_server_conn(&mut self) -> Result<(), error::Error> {
-        let provider = Arc::new(provider::default_provider());
+        let provider = Arc::new(provider::provider());
         let verifier = Arc::new(
             verifier::ClientVerifier::new(
                 &self.verify_x509_store,
