@@ -1475,6 +1475,22 @@ entry! {
     }
 }
 
+
+entry! {
+    pub fn _SSL_group_to_name(ssl: *const SSL, id: c_int) -> *const c_char {
+        try_clone_arc!(ssl)
+            .get()
+            .get_groups()
+            .iter()
+            .find(|group| named_group_to_nid(group.name()) == Some(id))
+            .map(|group| group.name())
+            .and_then(crate::TlsGroupInfo::find_by_id)
+            .map(|group| group.tls_name.as_ptr())
+            .unwrap_or_else(ptr::null)
+    }
+}
+
+
 entry! {
     pub fn _SSL_group_to_name(ssl: *const SSL, id: c_int) -> *const c_char {
         try_clone_arc!(ssl)

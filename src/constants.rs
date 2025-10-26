@@ -143,7 +143,6 @@ pub fn named_group_to_tls_name(id: NamedGroup) -> Option<&'static CStr> {
 
 pub fn named_group_to_nid(group: NamedGroup) -> Option<c_int> {
     use NamedGroup::*;
-
     // See TLSEXT_nid_unknown from tls1.h - openssl-sys does not
     // have a constant for this to import.
     const TLSEXT_NID_UNKNOWN: c_int = 0x1000000;
@@ -159,7 +158,6 @@ pub fn named_group_to_nid(group: NamedGroup) -> Option<c_int> {
     const NID_ML_KEM_512: c_int = 1454;
     const NID_ML_KEM_768: c_int = 1455;
     const NID_ML_KEM_1024: c_int = 1456;
-
     match group {
         secp256r1 => Some(NID_X9_62_prime256v1),
         secp384r1 => Some(NID_secp384r1),
