@@ -192,6 +192,7 @@ const ENTRYPOINTS: &[&str] = &[
     "SSL_get_verify_mode",
     "SSL_get_verify_result",
     "SSL_get_version",
+    "SSL_group_to_name",
     "SSL_get_wbio",
     "SSL_group_to_name",
     "SSL_has_pending",
