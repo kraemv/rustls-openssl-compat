@@ -10,11 +10,16 @@ use openssl_sys::{
 use rustls::pki_types::PrivateKeyDer;
 use rustls::sign;
 
+#[derive(Clone, Debug)]
+enum KeyType {
+    Unknown,
+    SigningKey(Arc<dyn sign::SigningKey>)
+}
 /// Safe, owning wrapper around an OpenSSL EVP_PKEY.
 #[derive(Debug)]
 pub struct EvpPkey {
     pkey: *const EVP_PKEY,
-    signing_key: Option<Arc<dyn sign::SigningKey>>
+    signing_key: KeyType
 }
 
 impl EvpPkey {
@@ -24,7 +29,14 @@ impl EvpPkey {
     pub fn new_incref(pkey: *mut EVP_PKEY) -> Self {
         debug_assert!(!pkey.is_null());
         unsafe { EVP_PKEY_up_ref(pkey) };
-        Self { pkey, signing_key: None }
+        let mut key= Self { pkey, signing_key: KeyType::Unknown };
+        match key.add_signing_key() {
+            Ok(signing_key) => {
+                key.set_signing_key(signing_key);
+                key
+            }
+            Err(_) => key
+        }
     }
 
     /// Parse a key from DER bytes.
@@ -35,36 +47,42 @@ impl EvpPkey {
         let pkey = unsafe { d2i_AutoPrivateKey(&mut old_ptr, &mut data_ptr, data_len as c_long) };
 
         let signing_key = provider::provider().key_provider.load_private_key(data).map_err(|_| error::Error::bad_data("Failed: PKEY key decoding"));
+        let signing_key = signing_key.map(KeyType::SigningKey).unwrap_or(KeyType::Unknown);
 
-        if pkey.is_null() || signing_key.is_err() {
+        if pkey.is_null() {
             None
         } else {
-            Some(Self { pkey, signing_key: Some(signing_key.unwrap())})
+            Some(Self { pkey, signing_key})
         }
     }
 
+    /// Get the signing key of this Pkey, if it can sign
     pub fn get_signing_key(&self) -> Option<Arc<dyn sign::SigningKey>> {
         match &self.signing_key {
-            Some(key) => Some(key.clone()),
-            None => None,
+            KeyType::SigningKey(key) => Some(key.clone()),
+            _ => None,
         }
     }
 
-    pub fn add_signing_key(&self) -> Result<Arc<dyn sign::SigningKey>, error::Error>{
+    fn set_signing_key(&mut self, key: Arc<dyn sign::SigningKey>) {
+        self.signing_key = KeyType::SigningKey(key);
+    }
+
+    fn add_signing_key(&self) -> Result<Arc<dyn sign::SigningKey>, error::Error>{
         let mut buf: *mut u8 = ptr::null_mut();
         let len = unsafe{ i2d_PrivateKey(self.borrow_ref(), &mut buf)};
         if len < 0 {
-            Err(error::Error::bad_data("Failed: PKEY key encoding"))?
+            unsafe { OPENSSL_free(buf as *mut _) };
+            Err(error::Error::bad_data("Failed: PKEY key encoding"))?;
         }
         let len = len as usize;
 
         let mut v = Vec::with_capacity(len);
         v.extend_from_slice(unsafe { slice::from_raw_parts(buf, len) });
-        let key_der = PrivateKeyDer::try_from(v)
-            .map_err(|_| error::Error::bad_data("Failed: PKEY key encoding"))?;
-
         unsafe { OPENSSL_free(buf as *mut _) };
 
+        let key_der = PrivateKeyDer::try_from(v)
+            .map_err(|_| error::Error::bad_data("Failed: PKEY key encoding"))?;
         provider::provider().key_provider.load_private_key(key_der).map_err(|_| error::Error::bad_data("Failed: PKEY key decoding"))
     }
 

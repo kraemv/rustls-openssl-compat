@@ -11,11 +11,7 @@ use std::sync::OnceLock;
 use std::{fs, path::PathBuf};
 
 use openssl_sys::{
-    stack_st_SSL_CIPHER, stack_st_X509, stack_st_X509_NAME, stack_st_void, NID_undef,
-    OPENSSL_malloc, TLSEXT_NAMETYPE_host_name, BIGNUM, EVP_CIPHER_CTX, EVP_PKEY, HMAC_CTX,
-    OPENSSL_NPN_NEGOTIATED, OPENSSL_NPN_NO_OVERLAP, SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER,
-    SSL_MODE_AUTO_RETRY, SSL_MODE_ENABLE_PARTIAL_WRITE, SSL_MODE_RELEASE_BUFFERS, X509, X509_STORE,
-    X509_STORE_CTX,
+    BIGNUM, EVP_CIPHER_CTX, EVP_PKEY, HMAC_CTX, NID_undef, OPENSSL_NPN_NEGOTIATED, OPENSSL_NPN_NO_OVERLAP, OPENSSL_malloc, PEM_read_bio_PrivateKey, SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER, SSL_MODE_AUTO_RETRY, SSL_MODE_ENABLE_PARTIAL_WRITE, SSL_MODE_RELEASE_BUFFERS, TLSEXT_NAMETYPE_host_name, X509, X509_STORE, X509_STORE_CTX, d2i_PKCS8_PRIV_KEY_INFO, i2d_PKCS8PrivateKey_bio, stack_st_SSL_CIPHER, stack_st_X509, stack_st_X509_NAME, stack_st_void
 };
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
@@ -164,6 +160,20 @@ impl Castable for SSL_METHOD {
 }
 
 pub type SSL_CTX = crate::SslContext;
+
+entry! {
+    pub fn _PEM_read_bio_PrivateKey(
+        bp: *mut BIO,
+        x: *mut *mut EVP_PKEY,
+        cb: pem_password_cb,
+        u: *mut c_void,
+    ) -> *mut EVP_PKEY {
+        let info = unsafe {d2i_PKCS8_PRIV_KEY_INFO(bp, x, ptr::null(), ptr::null(), 0, cb, u) };
+        let key = PEM_read_bio_PrivateKey(bp, x, cb, u)
+        let key = to_arc_mut_ptr(NotThreadSafe::new(key));
+        key
+    }
+}
 
 entry! {
     pub fn _SSL_CTX_new(meth: *const SSL_METHOD) -> *mut SSL_CTX {
