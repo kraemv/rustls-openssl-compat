@@ -4,16 +4,13 @@ use std::sync::Arc;
 
 use openssl_sys::{EVP_PKEY, X509};
 use rustls::client::ResolvesClientCert;
-use rustls::pki_types::{CertificateDer, SubjectPublicKeyInfoDer};
+use rustls::pki_types::CertificateDer;
 use rustls::server::{ClientHello, ResolvesServerCert};
 use rustls::sign;
 use rustls::{SignatureAlgorithm, SignatureScheme};
 
 use crate::error;
-use crate::evp_pkey::{
-    ecdsa_sha256, ecdsa_sha384, ecdsa_sha512, ed25519, rsa_pkcs1_sha256, rsa_pkcs1_sha384,
-    rsa_pkcs1_sha512, rsa_pss_sha256, rsa_pss_sha384, rsa_pss_sha512, EvpPkey, EvpScheme,
-};
+use crate::evp_pkey::EvpPkey;
 use crate::x509::{OwnedX509, OwnedX509Stack};
 
 /// This matches up to the implied state machine in `SSL_CTX_use_certificate_chain_file`
@@ -183,6 +180,7 @@ impl KeySetItem {
 #[derive(Clone, Debug)]
 pub(super) struct OpenSslCertifiedKey {
     key: EvpPkey,
+    signing_key: Arc<dyn sign::SigningKey>,
     openssl_chain: OwnedX509Stack,
     rustls_chain: Vec<CertificateDer<'static>>,
 }
@@ -193,7 +191,8 @@ impl OpenSslCertifiedKey {
         key: EvpPkey,
     ) -> Result<Self, error::Error> {
         Ok(Self {
-            key,
+            key: key.clone(),
+            signing_key: key.get_signing_key().ok_or(error::Error::not_supported("PKEY can not sign"))?,
             openssl_chain: OwnedX509Stack::from_rustls(&chain)?,
             rustls_chain: chain,
         })
@@ -202,7 +201,7 @@ impl OpenSslCertifiedKey {
     pub(super) fn keys_match(&self) -> bool {
         match sign::CertifiedKey::new(
             self.rustls_chain.clone(),
-            Arc::new(OpenSslKey(self.key.clone())),
+            self.get_signing_key(),
         )
         .keys_match()
         {
@@ -223,6 +222,10 @@ impl OpenSslCertifiedKey {
     fn borrow_key(&self) -> *mut EVP_PKEY {
         self.key.borrow_ref()
     }
+
+    fn get_signing_key(&self) -> Arc<dyn sign::SigningKey> {
+        self.signing_key.clone()
+    }
 }
 
 #[derive(Debug)]
@@ -239,7 +242,7 @@ impl ResolverByAlgorithm {
                 *alg,
                 Arc::new(sign::CertifiedKey::new(
                     constructed.rustls_chain.clone(),
-                    Arc::new(OpenSslKey(constructed.key.clone())),
+                    constructed.get_signing_key(),
                 )),
             );
         }
@@ -289,128 +292,5 @@ fn scheme_algorithm(scheme: &SignatureScheme) -> SignatureAlgorithm {
         ED25519 => SignatureAlgorithm::ED25519,
         ED448 => SignatureAlgorithm::ED448,
         _ => SignatureAlgorithm::Unknown(0),
-    }
-}
-
-#[derive(Debug)]
-struct OpenSslKey(EvpPkey);
-
-impl sign::SigningKey for OpenSslKey {
-    fn choose_scheme(&self, offered: &[SignatureScheme]) -> Option<Box<dyn sign::Signer>> {
-        match self.0.algorithm() {
-            SignatureAlgorithm::RSA => {
-                if offered.contains(&SignatureScheme::RSA_PSS_SHA512) {
-                    return Some(Box::new(OpenSslSigner {
-                        pkey: self.0.clone(),
-                        pscheme: rsa_pss_sha512(),
-                        scheme: SignatureScheme::RSA_PSS_SHA512,
-                    }));
-                }
-                if offered.contains(&SignatureScheme::RSA_PSS_SHA384) {
-                    return Some(Box::new(OpenSslSigner {
-                        pkey: self.0.clone(),
-                        pscheme: rsa_pss_sha384(),
-                        scheme: SignatureScheme::RSA_PSS_SHA384,
-                    }));
-                }
-                if offered.contains(&SignatureScheme::RSA_PSS_SHA256) {
-                    return Some(Box::new(OpenSslSigner {
-                        pkey: self.0.clone(),
-                        pscheme: rsa_pss_sha256(),
-                        scheme: SignatureScheme::RSA_PSS_SHA256,
-                    }));
-                }
-
-                if offered.contains(&SignatureScheme::RSA_PKCS1_SHA512) {
-                    return Some(Box::new(OpenSslSigner {
-                        pkey: self.0.clone(),
-                        pscheme: rsa_pkcs1_sha512(),
-                        scheme: SignatureScheme::RSA_PKCS1_SHA512,
-                    }));
-                }
-                if offered.contains(&SignatureScheme::RSA_PKCS1_SHA384) {
-                    return Some(Box::new(OpenSslSigner {
-                        pkey: self.0.clone(),
-                        pscheme: rsa_pkcs1_sha384(),
-                        scheme: SignatureScheme::RSA_PKCS1_SHA384,
-                    }));
-                }
-                if offered.contains(&SignatureScheme::RSA_PKCS1_SHA256) {
-                    return Some(Box::new(OpenSslSigner {
-                        pkey: self.0.clone(),
-                        pscheme: rsa_pkcs1_sha256(),
-                        scheme: SignatureScheme::RSA_PKCS1_SHA256,
-                    }));
-                }
-
-                None
-            }
-            SignatureAlgorithm::ED25519 => {
-                if offered.contains(&SignatureScheme::ED25519) {
-                    return Some(Box::new(OpenSslSigner {
-                        pkey: self.0.clone(),
-                        pscheme: ed25519(),
-                        scheme: SignatureScheme::ED25519,
-                    }));
-                }
-
-                None
-            }
-            SignatureAlgorithm::ECDSA => {
-                if offered.contains(&SignatureScheme::ECDSA_NISTP256_SHA256) {
-                    return Some(Box::new(OpenSslSigner {
-                        pkey: self.0.clone(),
-                        pscheme: ecdsa_sha256(),
-                        scheme: SignatureScheme::ECDSA_NISTP256_SHA256,
-                    }));
-                }
-                if offered.contains(&SignatureScheme::ECDSA_NISTP384_SHA384) {
-                    return Some(Box::new(OpenSslSigner {
-                        pkey: self.0.clone(),
-                        pscheme: ecdsa_sha384(),
-                        scheme: SignatureScheme::ECDSA_NISTP384_SHA384,
-                    }));
-                }
-                if offered.contains(&SignatureScheme::ECDSA_NISTP521_SHA512) {
-                    return Some(Box::new(OpenSslSigner {
-                        pkey: self.0.clone(),
-                        pscheme: ecdsa_sha512(),
-                        scheme: SignatureScheme::ECDSA_NISTP521_SHA512,
-                    }));
-                }
-
-                None
-            }
-            _ => None,
-        }
-    }
-
-    fn public_key(&self) -> Option<SubjectPublicKeyInfoDer<'_>> {
-        Some(SubjectPublicKeyInfoDer::from(
-            self.0.subject_public_key_info(),
-        ))
-    }
-
-    fn algorithm(&self) -> SignatureAlgorithm {
-        self.0.algorithm()
-    }
-}
-
-#[derive(Debug)]
-struct OpenSslSigner {
-    pkey: EvpPkey,
-    pscheme: Box<dyn EvpScheme + Send + Sync>,
-    scheme: SignatureScheme,
-}
-
-impl sign::Signer for OpenSslSigner {
-    fn sign(&self, message: &[u8]) -> Result<Vec<u8>, rustls::Error> {
-        self.pkey
-            .sign(self.pscheme.as_ref(), message)
-            .map_err(|_| rustls::Error::General("signing failed".to_string()))
-    }
-
-    fn scheme(&self) -> SignatureScheme {
-        self.scheme
     }
 }
