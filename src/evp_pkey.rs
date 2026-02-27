@@ -1,124 +1,97 @@
-use core::ffi::{c_char, c_int, c_long, CStr};
+use core::ffi::c_int;
 use core::{fmt, ptr};
-use std::slice;
+use std::sync::Arc;
+
+use crate::constants::{name_to_sig_alg, sig_scheme_to_type_nid};
 
 use openssl_sys::{
-    d2i_AutoPrivateKey, i2d_PUBKEY, EVP_DigestSign, EVP_DigestSignInit, EVP_MD_CTX_free,
-    EVP_MD_CTX_new, EVP_PKEY_CTX_set_rsa_padding, EVP_PKEY_CTX_set_rsa_pss_saltlen,
-    EVP_PKEY_CTX_set_signature_md, EVP_PKEY_free, EVP_PKEY_up_ref, EVP_sha256, EVP_sha384,
-    EVP_sha512, OPENSSL_free, EVP_MD, EVP_MD_CTX, EVP_PKEY, EVP_PKEY_CTX, RSA_PKCS1_PADDING,
-    RSA_PKCS1_PSS_PADDING,
+    EVP_DigestSign, EVP_DigestSignInit, EVP_MD_CTX_free, EVP_MD_CTX_new,
+    EVP_PKEY_CTX_set_rsa_padding, EVP_PKEY_CTX_set_rsa_pss_saltlen, EVP_PKEY_CTX_set_signature_md,
+    EVP_sha256, EVP_sha384, EVP_sha512, NID_undef, EVP_MD, EVP_MD_CTX, EVP_PKEY, EVP_PKEY_CTX,
+    RSA_PKCS1_PADDING, RSA_PKCS1_PSS_PADDING,
 };
-use rustls::pki_types::PrivateKeyDer;
 
+use rustls::pki_types::PrivateKeyDer;
+use rustls::sign::SigningKey;
+use rustls::SignatureScheme;
+
+#[derive(Debug)]
+pub(crate) struct EvpKeyInfo {
+    base_id: i32,
+    bits: i32,
+    description: i32,
+    id: i32,
+    security_bits: i32,
+    security_category: i32,
+    size: i32,
+    ty: i32,
+}
+/// Safe, owning wrapper around an OpenSSL EVP_PKEY.
+#[derive(Clone, Debug)]
+enum KeyType {
+    Unknown,
+    SigningKey(Arc<dyn SigningKey>)
+}
 /// Safe, owning wrapper around an OpenSSL EVP_PKEY.
 #[derive(Debug)]
 pub struct EvpPkey {
-    pkey: *const EVP_PKEY,
+    inner_key: KeyType,
+    scheme: Option<SignatureScheme>,
 }
 
 impl EvpPkey {
-    /// Use a pre-existing private key, incrementing ownership.
-    ///
-    /// `pkey` continues to belong to the caller.
-    pub fn new_incref(pkey: *mut EVP_PKEY) -> Self {
-        debug_assert!(!pkey.is_null());
-        unsafe { EVP_PKEY_up_ref(pkey) };
-        Self { pkey }
+    pub fn new() -> Self {
+        Self {
+            inner_key: KeyType::Unknown,
+            scheme: None,
+        }
+    }
+
+    pub fn as_ptr(&self) -> *mut EVP_PKEY {
+        self as *const Self as *mut EVP_PKEY
+    }
+
+    pub fn get_type(&self) -> c_int {
+        self.scheme
+            .and_then(sig_scheme_to_type_nid)
+            .unwrap_or(NID_undef)
     }
 
     /// Parse a key from DER bytes.
     pub fn new_from_der_bytes(data: PrivateKeyDer<'static>) -> Option<Self> {
-        let mut old_ptr = ptr::null_mut();
-        let mut data_ptr = data.secret_der().as_ptr();
-        let data_len = data.secret_der().len();
-        let pkey = unsafe { d2i_AutoPrivateKey(&mut old_ptr, &mut data_ptr, data_len as c_long) };
-
-        if pkey.is_null() {
-            None
-        } else {
-            Some(Self { pkey })
-        }
+        let provider = crate::provider::provider().key_provider;
+        provider.load_private_key(data).ok().map(|keydata| Self {
+            inner_key: KeyType::SigningKey(keydata),
+            scheme: None, // TODO: Determine here
+        })
     }
 
     /// Sign a message, returning the signature.
     pub fn sign(&self, scheme: &dyn EvpScheme, message: &[u8]) -> Result<Vec<u8>, ()> {
-        let mut ctx = SignCtx::new(scheme.digest(), self.pkey as *mut EVP_PKEY).ok_or(())?;
+        let mut ctx = SignCtx::new(scheme.digest(), self.as_ptr()).ok_or(())?;
         scheme.configure_ctx(&mut ctx).ok_or(())?;
         ctx.sign(message)
     }
 
     pub fn algorithm(&self) -> rustls::SignatureAlgorithm {
-        if self.is_rsa_type() {
-            rustls::SignatureAlgorithm::RSA
-        } else if self.is_ecdsa_type() {
-            rustls::SignatureAlgorithm::ECDSA
-        } else if self.is_ed25519_type() {
-            rustls::SignatureAlgorithm::ED25519
-        } else if self.is_ed448_type() {
-            rustls::SignatureAlgorithm::ED448
-        } else {
-            rustls::SignatureAlgorithm::Unknown(0)
+        match &self.inner_key {
+            KeyType::SigningKey(key) => key.algorithm(),
+            KeyType::Unknown => rustls::SignatureAlgorithm::Unknown(0),
         }
     }
 
     /// Return the Subject Public Key Info bytes for this key.
     pub fn subject_public_key_info(&self) -> Vec<u8> {
-        let (ptr, len) = unsafe {
-            let mut ptr = ptr::null_mut();
-            let len = i2d_PUBKEY(self.pkey, &mut ptr);
-            (ptr, len)
-        };
-
-        if len <= 0 {
-            return vec![];
+        match &self.inner_key{
+            KeyType::SigningKey(key) => key.public_key().map(|spki| spki.to_vec()).unwrap_or_default(),
+            KeyType::Unknown => Vec::new()
         }
-        let len = len as usize;
-
-        let mut v = Vec::with_capacity(len);
-        v.extend_from_slice(unsafe { slice::from_raw_parts(ptr, len) });
-
-        unsafe { OPENSSL_free(ptr as *mut _) };
-        v
     }
 
-    /// Caller borrows our reference.
-    pub fn borrow_ref(&self) -> *mut EVP_PKEY {
-        self.pkey as *mut EVP_PKEY
-    }
-
-    fn is_rsa_type(&self) -> bool {
-        self.is_a(c"RSA") || self.is_a(c"RSA-PSS")
-    }
-
-    fn is_ecdsa_type(&self) -> bool {
-        self.is_a(c"EC")
-    }
-
-    fn is_ed25519_type(&self) -> bool {
-        self.is_a(c"ED25519")
-    }
-
-    fn is_ed448_type(&self) -> bool {
-        self.is_a(c"ED448")
-    }
-
-    fn is_a(&self, which: &CStr) -> bool {
-        unsafe { EVP_PKEY_is_a(self.pkey, which.as_ptr()) == 1 }
-    }
-}
-
-impl Clone for EvpPkey {
-    fn clone(&self) -> Self {
-        unsafe { EVP_PKEY_up_ref(self.pkey as *mut EVP_PKEY) };
-        Self { pkey: self.pkey }
-    }
-}
-
-impl Drop for EvpPkey {
-    fn drop(&mut self) {
-        // safety: cast to *mut is safe, because refcounting is assumed atomic
-        unsafe { EVP_PKEY_free(self.pkey as *mut EVP_PKEY) };
+    pub fn is_a(&self, which: &str) -> bool {
+        name_to_sig_alg(which)
+            .map(|alg| self.algorithm() == alg)
+            .unwrap_or(false)
     }
 }
 
@@ -318,10 +291,6 @@ impl Drop for SignCtx {
     fn drop(&mut self) {
         unsafe { EVP_MD_CTX_free(self.md_ctx) };
     }
-}
-
-extern "C" {
-    pub fn EVP_PKEY_is_a(pkey: *const EVP_PKEY, name: *const c_char) -> c_int;
 }
 
 #[cfg(all(test, not(miri)))]

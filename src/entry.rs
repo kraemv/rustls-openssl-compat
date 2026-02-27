@@ -12,7 +12,7 @@ use std::{fs, path::PathBuf};
 
 use openssl_sys::{
     stack_st_SSL_CIPHER, stack_st_X509, stack_st_X509_NAME, stack_st_void, NID_undef,
-    OPENSSL_malloc, TLSEXT_NAMETYPE_host_name, BIGNUM, EVP_CIPHER_CTX, EVP_PKEY, HMAC_CTX,
+    OPENSSL_malloc, TLSEXT_NAMETYPE_host_name, BIGNUM, EVP_CIPHER_CTX, HMAC_CTX,
     OPENSSL_NPN_NEGOTIATED, OPENSSL_NPN_NO_OVERLAP, SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER,
     SSL_MODE_AUTO_RETRY, SSL_MODE_ENABLE_PARTIAL_WRITE, SSL_MODE_RELEASE_BUFFERS, X509, X509_STORE,
     X509_STORE_CTX,
@@ -103,6 +103,104 @@ entry! {
 entry! {
     pub fn _ERR_load_SSL_strings() -> c_int {
         C_INT_SUCCESS
+    }
+}
+
+type EVP_PKEY = EvpPkey;
+
+impl Castable for EVP_PKEY {
+    type Ownership = OwnershipArc;
+    type RustType = NotThreadSafe<Self>;
+}
+
+entry! {
+    pub fn _EVP_PKEY_new() -> *mut EVP_PKEY {
+        let out: *mut EVP_PKEY = to_arc_mut_ptr(NotThreadSafe::new(EvpPkey::new()));
+        // safety: we just made this object, the pointer must be valid
+        out
+    }
+}
+
+entry! {
+    pub fn _EVP_PKEY_up_ref(key: *mut EVP_PKEY) -> c_int {
+        let key = try_clone_arc!(key);
+        mem::forget(key.clone());
+        C_INT_SUCCESS
+    }
+}
+
+/*entry! {
+    pub fn _EVP_PKEY_dup(key: *mut EVP_PKEY) -> *mut EVP_PKEY{
+        free_arc(key)
+    }
+}*/
+
+entry! {
+    pub fn _EVP_PKEY_free(key: *mut EVP_PKEY) {
+        free_arc(key)
+    }
+}
+
+entry! {
+    pub fn _EVP_PKEY_get_id(key: *mut EVP_PKEY) -> c_int {
+        try_clone_arc!(key).get().get_type()
+    }
+}
+
+/*
+entry! {
+    pub fn _EVP_PKEY_get_size(key: *mut EVP_PKEY) -> c_int{
+        try_clone_arc!(key)
+    }
+
+}
+
+entry! {
+    pub fn _EVP_PKEY_get_bits(key: *mut EVP_PKEY) -> c_int{
+
+    }
+
+}
+
+entry! {
+    pub fn _EVP_PKEY_get_security_bits(key: *mut EVP_PKEY) -> c_int{
+
+    }
+
+}
+
+entry! {
+    pub fn _EVP_PKEY_get_security_category(key: *mut EVP_PKEY) -> c_int{
+
+    }
+}
+ */
+
+entry! {
+    pub fn _EVP_PKEY_is_a(key: *mut EVP_PKEY, name: *const c_char) -> c_int {
+        try_clone_arc!(key).get().is_a(try_str!(name)).into()
+    }
+}
+
+entry! {
+    pub fn _EVP_PKEY_can_sign(key: *mut EVP_PKEY) -> c_int {
+        1
+    }
+}
+
+entry! {
+    pub fn _PEM_read_bio_PrivateKey(
+        bp: *mut BIO,
+        x: *mut *mut EVP_PKEY,
+        cb: pem_password_cb,
+        u: &[u8],
+    ) -> *mut EVP_PKEY {
+        let key = crate::read_pem_key(Bio::new_pair(Some(bp), Some(bp)), &[]);
+        let key = to_arc_mut_ptr(NotThreadSafe::new(key));
+        unsafe {
+            ptr::write(x, key);
+        }
+        key
     }
 }
 
@@ -605,6 +703,8 @@ entry! {
             }
         };
 
+        let key = Arc::new(NotThreadSafe::new(key));
+
         match ctx.get_mut().commit_private_key(key) {
             Err(e) => e.raise().into(),
             Ok(()) => C_INT_SUCCESS,
@@ -615,12 +715,7 @@ entry! {
 entry! {
     pub fn _SSL_CTX_use_PrivateKey(ctx: *mut SSL_CTX, pkey: *mut EVP_PKEY) -> c_int {
         let ctx = try_clone_arc!(ctx);
-
-        if pkey.is_null() {
-            return Error::null_pointer().raise().into();
-        }
-
-        let pkey = EvpPkey::new_incref(pkey);
+        let pkey = try_clone_arc!(pkey);
 
         match ctx.get_mut().commit_private_key(pkey) {
             Err(e) => e.raise().into(),
@@ -1582,12 +1677,7 @@ entry! {
 entry! {
     pub fn _SSL_use_PrivateKey(ssl: *mut SSL, pkey: *mut EVP_PKEY) -> c_int {
         let ssl = try_clone_arc!(ssl);
-
-        if pkey.is_null() {
-            return Error::null_pointer().raise().into();
-        }
-
-        let pkey = EvpPkey::new_incref(pkey);
+        let pkey = try_clone_arc!(pkey);
 
         match ssl.get_mut().commit_private_key(pkey) {
             Err(e) => e.raise().into(),
@@ -1611,6 +1701,8 @@ entry! {
                 return err.raise().into();
             }
         };
+
+        let key = Arc::new(NotThreadSafe::new(key));
 
         match ssl.get_mut().commit_private_key(key) {
             Err(e) => e.raise().into(),
@@ -2144,10 +2236,12 @@ entry! {
             return 0;
         }
 
+        let pkey = try_clone_arc!(pkey);
+
         let chain = vec![CertificateDer::from(
             OwnedX509::new_incref(cert).der_bytes(),
         )];
-        let Ok(certified_key) = OpenSslCertifiedKey::new(chain, EvpPkey::new_incref(pkey)) else {
+        let Ok(certified_key) = OpenSslCertifiedKey::new(chain, pkey.clone()) else {
             return 0;
         };
 

@@ -4,8 +4,8 @@ use std::path::PathBuf;
 use std::{fs, io};
 
 use openssl_sys::{
-    d2i_X509, i2d_X509, stack_st_X509, OPENSSL_free, OPENSSL_sk_new_null, OPENSSL_sk_num,
-    OPENSSL_sk_push, OPENSSL_sk_value, X509_STORE_add_cert, X509_STORE_free,
+    d2i_X509, i2d_PUBKEY, i2d_X509, stack_st_X509, OPENSSL_free, OPENSSL_sk_new_null,
+    OPENSSL_sk_num, OPENSSL_sk_push, OPENSSL_sk_value, X509_STORE_add_cert, X509_STORE_free,
     X509_STORE_get0_objects, X509_STORE_get1_all_certs, X509_STORE_new, X509_free, EVP_PKEY,
     OPENSSL_STACK, X509, X509_STORE,
 };
@@ -211,7 +211,21 @@ impl OwnedX509 {
     pub fn public_key(&self) -> EvpPkey {
         // SAFETY: `X509_get0_pubkey` returns borrow of X509's public key ref.
         // `EvpPkey::new_incref` obtains its own ref.
-        EvpPkey::new_incref(unsafe { X509_get0_pubkey(self.raw) })
+
+        let mut buf: *mut u8 = ptr::null_mut();
+
+        let key = unsafe { X509_get0_pubkey(self.raw) };
+        let len = unsafe { i2d_PUBKEY(key, &mut buf) } as usize;
+
+        let mut v = Vec::with_capacity(len);
+        v.extend_from_slice(unsafe { slice::from_raw_parts(buf, len) });
+
+        unsafe { OPENSSL_free(buf as *mut _) };
+        EvpPkey::new_from_der_bytes(
+            rustls::pki_types::PrivateKeyDer::try_from(v)
+                .expect("Should not fail for valid public keys"),
+        )
+        .expect("Should not fail for valid public keys")
     }
 
     /// Give out our reference.

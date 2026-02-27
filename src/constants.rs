@@ -5,7 +5,7 @@ use openssl_sys::{
 };
 
 use rustls::internal::msgs::enums::AlertLevel;
-use rustls::{AlertDescription, NamedGroup, SignatureScheme};
+use rustls::{AlertDescription, NamedGroup, SignatureAlgorithm, SignatureScheme};
 
 pub fn alert_desc_to_long_string(value: c_int) -> &'static CStr {
     match AlertDescription::from(value as u8) {
@@ -118,6 +118,17 @@ pub fn sig_scheme_to_type_nid(scheme: SignatureScheme) -> Option<c_int> {
         // Omitted: SHA1 legacy schemes.
         _ => None,
     }
+}
+
+pub fn name_to_sig_alg(name: &str) -> Option<SignatureAlgorithm> {
+    Some(match name {
+        "DSA" => SignatureAlgorithm::DSA,
+        "EC" => SignatureAlgorithm::ECDSA,
+        "ED448" => SignatureAlgorithm::ED448,
+        "ED25519" => SignatureAlgorithm::ED25519,
+        "RSA" => SignatureAlgorithm::RSA,
+        _ => return None,
+    })
 }
 
 pub fn named_group_to_tls_name(id: NamedGroup) -> Option<&'static CStr> {

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::ptr;
 use std::sync::Arc;
 
-use openssl_sys::{EVP_PKEY, X509};
+use openssl_sys::X509;
 use rustls::client::ResolvesClientCert;
 use rustls::pki_types::{CertificateDer, SubjectPublicKeyInfoDer};
 use rustls::server::{ClientHello, ResolvesServerCert};
@@ -14,6 +14,7 @@ use crate::evp_pkey::{
     ecdsa_sha256, ecdsa_sha384, ecdsa_sha512, ed25519, rsa_pkcs1_sha256, rsa_pkcs1_sha384,
     rsa_pkcs1_sha512, rsa_pss_sha256, rsa_pss_sha384, rsa_pss_sha512, EvpPkey, EvpScheme,
 };
+use crate::not_thread_safe::NotThreadSafe;
 use crate::x509::{OwnedX509, OwnedX509Stack};
 
 /// This matches up to the implied state machine in `SSL_CTX_use_certificate_chain_file`
@@ -87,8 +88,12 @@ impl CertifiedKeySet {
         item.promote()
     }
 
-    pub fn commit_private_key(&mut self, key: EvpPkey) -> Result<(), error::Error> {
-        let alg = key.algorithm();
+    pub fn commit_private_key(
+        &mut self,
+        key: Arc<NotThreadSafe<EvpPkey>>,
+        inner: &EvpPkey,
+    ) -> Result<(), error::Error> {
+        let alg = inner.algorithm();
         self.last_algorithm = Some(alg);
 
         let tail = self.pending_cert_chain_tail.take();
@@ -116,7 +121,7 @@ impl CertifiedKeySet {
     }
 
     /// For `SSL_get_privatekey`
-    pub fn borrow_current_key(&self) -> *mut EVP_PKEY {
+    pub fn borrow_current_key(&self) -> *mut EvpPkey {
         self.last_algorithm
             .and_then(|alg| self.item(alg))
             .and_then(|item| item.constructed.as_ref())
@@ -142,7 +147,7 @@ pub struct KeySetItem {
     cert_end_entity: Option<CertificateDer<'static>>,
 
     /// Most recent value from `SSL_CTX_use_PrivateKey_file`
-    key: Option<EvpPkey>,
+    key: Option<Arc<NotThreadSafe<EvpPkey>>>,
 
     /// The key and certificate we're currently using.
     ///
@@ -182,7 +187,7 @@ impl KeySetItem {
 
 #[derive(Clone, Debug)]
 pub(super) struct OpenSslCertifiedKey {
-    key: EvpPkey,
+    key: Arc<NotThreadSafe<EvpPkey>>,
     openssl_chain: OwnedX509Stack,
     rustls_chain: Vec<CertificateDer<'static>>,
 }
@@ -190,7 +195,7 @@ pub(super) struct OpenSslCertifiedKey {
 impl OpenSslCertifiedKey {
     pub(super) fn new(
         chain: Vec<CertificateDer<'static>>,
-        key: EvpPkey,
+        key: Arc<NotThreadSafe<EvpPkey>>,
     ) -> Result<Self, error::Error> {
         Ok(Self {
             key,
@@ -202,7 +207,7 @@ impl OpenSslCertifiedKey {
     pub(super) fn keys_match(&self) -> bool {
         match sign::CertifiedKey::new(
             self.rustls_chain.clone(),
-            Arc::new(OpenSslKey(self.key.clone())),
+            Arc::new(EvpPkeySigningKey(self.key.clone())),
         )
         .keys_match()
         {
@@ -220,8 +225,8 @@ impl OpenSslCertifiedKey {
         self.openssl_chain.borrow_top_ref()
     }
 
-    fn borrow_key(&self) -> *mut EVP_PKEY {
-        self.key.borrow_ref()
+    fn borrow_key(&self) -> *mut EvpPkey {
+        self.key.get_mut()
     }
 }
 
@@ -239,7 +244,7 @@ impl ResolverByAlgorithm {
                 *alg,
                 Arc::new(sign::CertifiedKey::new(
                     constructed.rustls_chain.clone(),
-                    Arc::new(OpenSslKey(constructed.key.clone())),
+                    Arc::new(EvpPkeySigningKey(constructed.key.clone())),
                 )),
             );
         }
@@ -293,11 +298,23 @@ fn scheme_algorithm(scheme: &SignatureScheme) -> SignatureAlgorithm {
 }
 
 #[derive(Debug)]
-struct OpenSslKey(EvpPkey);
+struct EvpPkeySigningKey(Arc<NotThreadSafe<EvpPkey>>);
 
-impl sign::SigningKey for OpenSslKey {
+impl From<Arc<NotThreadSafe<EvpPkey>>> for EvpPkeySigningKey {
+    fn from(key: Arc<NotThreadSafe<EvpPkey>>) -> Self {
+        Self(key)
+    }
+}
+
+impl From<EvpPkeySigningKey> for Arc<NotThreadSafe<EvpPkey>> {
+    fn from(key: EvpPkeySigningKey) -> Self {
+        key.0
+    }
+}
+
+impl sign::SigningKey for EvpPkeySigningKey {
     fn choose_scheme(&self, offered: &[SignatureScheme]) -> Option<Box<dyn sign::Signer>> {
-        match self.0.algorithm() {
+        match self.algorithm() {
             SignatureAlgorithm::RSA => {
                 if offered.contains(&SignatureScheme::RSA_PSS_SHA512) {
                     return Some(Box::new(OpenSslSigner {
@@ -387,18 +404,18 @@ impl sign::SigningKey for OpenSslKey {
 
     fn public_key(&self) -> Option<SubjectPublicKeyInfoDer<'_>> {
         Some(SubjectPublicKeyInfoDer::from(
-            self.0.subject_public_key_info(),
+            self.0.get().subject_public_key_info(),
         ))
     }
 
     fn algorithm(&self) -> SignatureAlgorithm {
-        self.0.algorithm()
+        self.0.get().algorithm()
     }
 }
 
 #[derive(Debug)]
 struct OpenSslSigner {
-    pkey: EvpPkey,
+    pkey: Arc<NotThreadSafe<EvpPkey>>,
     pscheme: Box<dyn EvpScheme + Send + Sync>,
     scheme: SignatureScheme,
 }
@@ -406,6 +423,7 @@ struct OpenSslSigner {
 impl sign::Signer for OpenSslSigner {
     fn sign(&self, message: &[u8]) -> Result<Vec<u8>, rustls::Error> {
         self.pkey
+            .get()
             .sign(self.pscheme.as_ref(), message)
             .map_err(|_| rustls::Error::General("signing failed".to_string()))
     }
