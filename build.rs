@@ -44,6 +44,7 @@ const ENTRYPOINTS: &[&str] = &[
     "ERR_load_SSL_strings",
     "i2d_SSL_SESSION",
     "OPENSSL_init_ssl",
+    "PEM_read_bio_PrivateKey",
     "SSL_accept",
     "SSL_add_file_cert_subjects_to_stack",
     "SSL_alert_desc_string",

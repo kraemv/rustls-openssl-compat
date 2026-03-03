@@ -11,7 +11,7 @@ use std::sync::OnceLock;
 use std::{fs, path::PathBuf};
 
 use openssl_sys::{
-    BIGNUM, EVP_CIPHER_CTX, EVP_PKEY, HMAC_CTX, NID_undef, OPENSSL_NPN_NEGOTIATED, OPENSSL_NPN_NO_OVERLAP, OPENSSL_malloc, PEM_read_bio_PrivateKey, SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER, SSL_MODE_AUTO_RETRY, SSL_MODE_ENABLE_PARTIAL_WRITE, SSL_MODE_RELEASE_BUFFERS, TLSEXT_NAMETYPE_host_name, X509, X509_STORE, X509_STORE_CTX, d2i_PKCS8_PRIV_KEY_INFO, i2d_PKCS8PrivateKey_bio, stack_st_SSL_CIPHER, stack_st_X509, stack_st_X509_NAME, stack_st_void
+    BIGNUM, EVP_CIPHER_CTX, EVP_PKCS82PKEY, EVP_PKEY, HMAC_CTX, NID_undef, OPENSSL_NPN_NEGOTIATED, OPENSSL_NPN_NO_OVERLAP, OPENSSL_malloc, SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER, SSL_MODE_AUTO_RETRY, SSL_MODE_ENABLE_PARTIAL_WRITE, SSL_MODE_RELEASE_BUFFERS, TLSEXT_NAMETYPE_host_name, X509, X509_STORE, X509_STORE_CTX, d2i_PKCS8_PRIV_KEY_INFO, stack_st_SSL_CIPHER, stack_st_X509, stack_st_X509_ATTRIBUTE, stack_st_X509_NAME, stack_st_void
 };
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
@@ -168,9 +168,21 @@ entry! {
         cb: pem_password_cb,
         u: *mut c_void,
     ) -> *mut EVP_PKEY {
-        let info = unsafe {d2i_PKCS8_PRIV_KEY_INFO(bp, x, ptr::null(), ptr::null(), 0, cb, u) };
-        let key = PEM_read_bio_PrivateKey(bp, x, cb, u)
-        let key = to_arc_mut_ptr(NotThreadSafe::new(key));
+        let mut bp = Bio::new_pair(Some(bp), Some(bp));
+        let mut der_bytes = vec![0u8; 0];
+        let der_len = bp.read_to_end(&mut der_bytes);
+        let der_len = match der_len {
+            Ok(der_len) => der_len,
+            Err(e) => {print!("{e}"); return ptr::null_mut();}
+        };
+        let Ok(der_len) =  i64::try_from(der_len)
+        else { return ptr::null_mut()};
+
+        let info = unsafe{ d2i_PKCS8_PRIV_KEY_INFO (ptr::null_mut(), &mut der_bytes.as_ptr(), der_len)};
+        let attrs = unsafe {*(info as *mut *mut stack_st_X509_ATTRIBUTE).wrapping_add(32)};
+        let key = unsafe{ EVP_PKCS82PKEY(info)};
+        unsafe {*(key as *mut *mut stack_st_X509_ATTRIBUTE).wrapping_add(0x50) = attrs};
+
         key
     }
 }
