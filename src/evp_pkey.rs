@@ -1,407 +1,213 @@
-use core::ffi::{c_char, c_int, c_long, CStr};
-use core::{fmt, ptr};
-use std::slice;
+use core::ffi::{c_char, c_int};
+use std::ptr;
+use std::sync::Arc;
 
-use openssl_sys::{
-    d2i_AutoPrivateKey, i2d_PUBKEY, EVP_DigestSign, EVP_DigestSignInit, EVP_MD_CTX_free,
-    EVP_MD_CTX_new, EVP_PKEY_CTX_set_rsa_padding, EVP_PKEY_CTX_set_rsa_pss_saltlen,
-    EVP_PKEY_CTX_set_signature_md, EVP_PKEY_free, EVP_PKEY_up_ref, EVP_sha256, EVP_sha384,
-    EVP_sha512, OPENSSL_free, EVP_MD, EVP_MD_CTX, EVP_PKEY, EVP_PKEY_CTX, RSA_PKCS1_PADDING,
-    RSA_PKCS1_PSS_PADDING,
-};
-use rustls::pki_types::PrivateKeyDer;
+use crate::constants::{name_to_sig_alg, scheme_to_info};
+use crate::error::Error;
+use crate::not_thread_safe::NotThreadSafe;
+
+use openssl_sys::EVP_PKEY;
+
+use rustls::crypto::{ActiveKeyExchange, SupportedKxGroup};
+use rustls::pki_types::{PrivateKeyDer, SignatureVerificationAlgorithm};
+use rustls::sign::SigningKey;
+use rustls::SignatureScheme;
+use x509_cert::attr::{Attribute, Attributes};
 
 /// Safe, owning wrapper around an OpenSSL EVP_PKEY.
-#[derive(Debug)]
+#[derive(Default)]
+enum KeyType {
+    #[default]
+    Unknown,
+    ExchangePrivateKey(Box<dyn ActiveKeyExchange>),
+    ExchangePublicKey(Arc<dyn SupportedKxGroup>, Vec<u8>),
+    PrivateKeyShare(Arc<dyn SupportedKxGroup>),
+    PublicKeyShare(Arc<dyn ActiveKeyExchange>),
+    SigningKey(Arc<dyn SigningKey>),
+    VerificationKey(Arc<dyn SignatureVerificationAlgorithm>, Vec<u8>),
+
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) enum Scheme {
+    #[default]
+    Unknown,
+    SignatureScheme(SignatureScheme),
+}
+
+/// Safe, owning wrapper around an OpenSSL EVP_PKEY.
+#[derive(Default)]
 pub struct EvpPkey {
-    pkey: *const EVP_PKEY,
+    inner_key: KeyType,
+    attributes: Attributes,
+    scheme: Scheme,
 }
 
 impl EvpPkey {
-    /// Use a pre-existing private key, incrementing ownership.
-    ///
-    /// `pkey` continues to belong to the caller.
-    pub fn new_incref(pkey: *mut EVP_PKEY) -> Self {
-        debug_assert!(!pkey.is_null());
-        unsafe { EVP_PKEY_up_ref(pkey) };
-        Self { pkey }
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn as_ptr(&self) -> *mut EVP_PKEY {
+        self as *const Self as *mut EVP_PKEY
+    }
+
+    pub fn is_signing_key(&self) -> bool {
+        matches!(&self.inner_key, KeyType::SigningKey(_))
+    }
+
+    pub fn get_attributes(&self) -> &[Attribute] {
+        self.attributes.as_slice()
+    }
+
+    pub fn get_base_id(&self) -> c_int {
+        scheme_to_info(&self.scheme).map(|info| info.get_id()).unwrap_or(0)
+    }
+
+    pub fn get_bits(&self) -> c_int {
+        scheme_to_info(&self.scheme).map(|info| info.get_bits()).unwrap_or(0)
+    }
+
+    pub fn get_description(&self) -> *const c_char {
+        scheme_to_info(&self.scheme).map(|info| info.get_description().as_ptr()).unwrap_or(ptr::null())
+    }
+
+    pub fn get_id(&self) -> c_int {
+        scheme_to_info(&self.scheme).map(|info| info.get_id()).unwrap_or(0)
+    }
+
+    pub(crate) fn get_scheme(&self) -> Scheme {
+        self.scheme.clone()
+    }
+
+    pub fn get_security_bits(&self) -> c_int {
+        scheme_to_info(&self.scheme).map(|info| info.get_security_bits()).unwrap_or(0)
+    }
+
+    pub fn get_size(&self) -> c_int {
+        scheme_to_info(&self.scheme).map(|info| info.get_size()).unwrap_or(0)
+    }
+
+    fn reset_key(&mut self) {
+        *self = Self::default()
     }
 
     /// Parse a key from DER bytes.
     pub fn new_from_der_bytes(data: PrivateKeyDer<'static>) -> Option<Self> {
-        let mut old_ptr = ptr::null_mut();
-        let mut data_ptr = data.secret_der().as_ptr();
-        let data_len = data.secret_der().len();
-        let pkey = unsafe { d2i_AutoPrivateKey(&mut old_ptr, &mut data_ptr, data_len as c_long) };
+        let provider = crate::provider::provider().key_provider;
+        provider.load_private_key(data).ok().map(|keydata| Self {
+            inner_key: KeyType::SigningKey(keydata),
+            attributes: Attributes::new(),
+            scheme: Scheme::Unknown, // TODO: Determine here
+        })
+    }
 
-        if pkey.is_null() {
-            None
-        } else {
-            Some(Self { pkey })
+    pub fn get_encaps_key(&self) -> Result<(Arc<dyn SupportedKxGroup>, &[u8]), Error> {
+        match &self.inner_key {
+            KeyType::ExchangePublicKey(group, key) => Ok((group.clone(), key.as_ref())),
+            _ => Err(Error::not_supported("Not an encaps key")),
         }
     }
 
-    /// Sign a message, returning the signature.
-    pub fn sign(&self, scheme: &dyn EvpScheme, message: &[u8]) -> Result<Vec<u8>, ()> {
-        let mut ctx = SignCtx::new(scheme.digest(), self.pkey as *mut EVP_PKEY).ok_or(())?;
-        scheme.configure_ctx(&mut ctx).ok_or(())?;
-        ctx.sign(message)
-    }
-
-    pub fn algorithm(&self) -> rustls::SignatureAlgorithm {
-        if self.is_rsa_type() {
-            rustls::SignatureAlgorithm::RSA
-        } else if self.is_ecdsa_type() {
-            rustls::SignatureAlgorithm::ECDSA
-        } else if self.is_ed25519_type() {
-            rustls::SignatureAlgorithm::ED25519
-        } else if self.is_ed448_type() {
-            rustls::SignatureAlgorithm::ED448
-        } else {
-            rustls::SignatureAlgorithm::Unknown(0)
+    pub fn get_private_share(&self) -> Result<Arc<dyn SupportedKxGroup>, Error> {
+        match &self.inner_key {
+            KeyType::PrivateKeyShare(key) => Ok(key.clone()),
+            _ => Err(Error::not_supported("Not a private key share")),
         }
     }
 
-    /// Return the Subject Public Key Info bytes for this key.
-    pub fn subject_public_key_info(&self) -> Vec<u8> {
-        let (ptr, len) = unsafe {
-            let mut ptr = ptr::null_mut();
-            let len = i2d_PUBKEY(self.pkey, &mut ptr);
-            (ptr, len)
-        };
-
-        if len <= 0 {
-            return vec![];
+    pub fn get_public_share(&self) -> Result<Arc<dyn ActiveKeyExchange>, Error> {
+        match &self.inner_key {
+            KeyType::PublicKeyShare(key) => Ok(key.clone()),
+            _ => Err(Error::not_supported("Not a public key share")),
         }
-        let len = len as usize;
-
-        let mut v = Vec::with_capacity(len);
-        v.extend_from_slice(unsafe { slice::from_raw_parts(ptr, len) });
-
-        unsafe { OPENSSL_free(ptr as *mut _) };
-        v
     }
 
-    /// Caller borrows our reference.
-    pub fn borrow_ref(&self) -> *mut EVP_PKEY {
-        self.pkey as *mut EVP_PKEY
+    pub fn get_signing_key(&self) -> Result<Arc<dyn SigningKey>, Error> {
+        match &self.inner_key {
+            KeyType::SigningKey(key) => Ok(key.clone()),
+            _ => Err(Error::not_supported("Not a signing key")),
+        }
     }
 
-    fn is_rsa_type(&self) -> bool {
-        self.is_a(c"RSA") || self.is_a(c"RSA-PSS")
+    pub fn get_verify_key(&self) -> Result<(Arc<dyn SignatureVerificationAlgorithm>, &[u8]), Error> {
+        match &self.inner_key {
+            KeyType::VerificationKey(alg, key) => Ok((alg.clone(), key.as_ref())),
+            _ => Err(Error::not_supported("Not a verification key")),
+        }
     }
 
-    fn is_ecdsa_type(&self) -> bool {
-        self.is_a(c"EC")
-    }
+    pub fn take_decaps_key(&mut self) -> Result<Box <dyn ActiveKeyExchange>, Error> {
+        let old_key = std::mem::take(&mut self.inner_key);
 
-    fn is_ed25519_type(&self) -> bool {
-        self.is_a(c"ED25519")
-    }
-
-    fn is_ed448_type(&self) -> bool {
-        self.is_a(c"ED448")
-    }
-
-    fn is_a(&self, which: &CStr) -> bool {
-        unsafe { EVP_PKEY_is_a(self.pkey, which.as_ptr()) == 1 }
-    }
-}
-
-impl Clone for EvpPkey {
-    fn clone(&self) -> Self {
-        unsafe { EVP_PKEY_up_ref(self.pkey as *mut EVP_PKEY) };
-        Self { pkey: self.pkey }
-    }
-}
-
-impl Drop for EvpPkey {
-    fn drop(&mut self) {
-        // safety: cast to *mut is safe, because refcounting is assumed atomic
-        unsafe { EVP_PKEY_free(self.pkey as *mut EVP_PKEY) };
-    }
-}
-
-// We assume read-only (const *EVP_PKEY) functions on EVP_PKEYs are thread safe,
-// and refcounting is atomic. The actual facts are not documented.
-unsafe impl Sync for EvpPkey {}
-unsafe impl Send for EvpPkey {}
-
-pub trait EvpScheme: fmt::Debug {
-    fn digest(&self) -> *mut EVP_MD;
-    fn configure_ctx(&self, ctx: &mut SignCtx) -> Option<()>;
-}
-
-pub fn rsa_pkcs1_sha256() -> Box<dyn EvpScheme + Send + Sync> {
-    Box::new(RsaPkcs1(unsafe { EVP_sha256() }))
-}
-
-pub fn rsa_pkcs1_sha384() -> Box<dyn EvpScheme + Send + Sync> {
-    Box::new(RsaPkcs1(unsafe { EVP_sha384() }))
-}
-
-pub fn rsa_pkcs1_sha512() -> Box<dyn EvpScheme + Send + Sync> {
-    Box::new(RsaPkcs1(unsafe { EVP_sha512() }))
-}
-
-#[derive(Debug)]
-struct RsaPkcs1(*const EVP_MD);
-
-impl EvpScheme for RsaPkcs1 {
-    fn digest(&self) -> *mut EVP_MD {
-        self.0 as *mut EVP_MD
-    }
-
-    fn configure_ctx(&self, ctx: &mut SignCtx) -> Option<()> {
-        ctx.set_signature_md(self.0)
-            .and_then(|_| ctx.set_rsa_padding(RSA_PKCS1_PADDING))
-    }
-}
-
-unsafe impl Sync for RsaPkcs1 {}
-unsafe impl Send for RsaPkcs1 {}
-
-pub fn rsa_pss_sha256() -> Box<dyn EvpScheme + Send + Sync> {
-    Box::new(RsaPss(unsafe { EVP_sha256() }))
-}
-
-pub fn rsa_pss_sha384() -> Box<dyn EvpScheme + Send + Sync> {
-    Box::new(RsaPss(unsafe { EVP_sha384() }))
-}
-
-pub fn rsa_pss_sha512() -> Box<dyn EvpScheme + Send + Sync> {
-    Box::new(RsaPss(unsafe { EVP_sha512() }))
-}
-
-#[derive(Debug)]
-struct RsaPss(*const EVP_MD);
-
-impl EvpScheme for RsaPss {
-    fn digest(&self) -> *mut EVP_MD {
-        self.0 as *mut EVP_MD
-    }
-
-    fn configure_ctx(&self, ctx: &mut SignCtx) -> Option<()> {
-        const RSA_PSS_SALTLEN_DIGEST: c_int = -1;
-        ctx.set_signature_md(self.0)
-            .and_then(|_| ctx.set_rsa_padding(RSA_PKCS1_PSS_PADDING))
-            .and_then(|_| ctx.set_pss_saltlen(RSA_PSS_SALTLEN_DIGEST))
-    }
-}
-
-unsafe impl Sync for RsaPss {}
-unsafe impl Send for RsaPss {}
-
-pub fn ed25519() -> Box<dyn EvpScheme + Send + Sync> {
-    Box::new(Ed25519)
-}
-
-#[derive(Debug)]
-struct Ed25519;
-
-impl EvpScheme for Ed25519 {
-    fn digest(&self) -> *mut EVP_MD {
-        // "When calling EVP_DigestSignInit() or EVP_DigestVerifyInit(), the
-        // digest type parameter MUST be set to NULL."
-        // <https://www.openssl.org/docs/man3.0/man7/EVP_SIGNATURE-ED25519.html>
-        ptr::null_mut()
-    }
-
-    fn configure_ctx(&self, _: &mut SignCtx) -> Option<()> {
-        // "No additional parameters can be set during one-shot signing or verification."
-        Some(())
-    }
-}
-
-pub fn ecdsa_sha256() -> Box<dyn EvpScheme + Send + Sync> {
-    Box::new(Ecdsa(unsafe { EVP_sha256() }))
-}
-
-pub fn ecdsa_sha384() -> Box<dyn EvpScheme + Send + Sync> {
-    Box::new(Ecdsa(unsafe { EVP_sha384() }))
-}
-
-pub fn ecdsa_sha512() -> Box<dyn EvpScheme + Send + Sync> {
-    Box::new(Ecdsa(unsafe { EVP_sha512() }))
-}
-
-#[derive(Debug)]
-struct Ecdsa(*const EVP_MD);
-
-impl EvpScheme for Ecdsa {
-    fn digest(&self) -> *mut EVP_MD {
-        self.0 as *mut EVP_MD
-    }
-
-    fn configure_ctx(&self, _: &mut SignCtx) -> Option<()> {
-        Some(())
-    }
-}
-
-unsafe impl Sync for Ecdsa {}
-unsafe impl Send for Ecdsa {}
-
-/// Owning wrapper for a signing `EVP_MD_CTX`
-pub(crate) struct SignCtx {
-    md_ctx: *mut EVP_MD_CTX,
-    // owned by `md_ctx`
-    pkey_ctx: *mut EVP_PKEY_CTX,
-}
-
-impl SignCtx {
-    fn new(md: *mut EVP_MD, pkey: *mut EVP_PKEY) -> Option<Self> {
-        let md_ctx = unsafe { EVP_MD_CTX_new() };
-        let mut pkey_ctx = ptr::null_mut();
-
-        match unsafe { EVP_DigestSignInit(md_ctx, &mut pkey_ctx, md, ptr::null_mut(), pkey) } {
-            1 => {}
-            _ => {
-                unsafe { EVP_MD_CTX_free(md_ctx) };
-                return None;
+        match old_key {
+            KeyType::ExchangePrivateKey(key) => {
+                self.reset_key();
+                Ok(key)
             }
-        };
-
-        Some(Self { md_ctx, pkey_ctx })
-    }
-
-    fn set_signature_md(&mut self, md: *const EVP_MD) -> Option<()> {
-        unsafe { EVP_PKEY_CTX_set_signature_md(self.pkey_ctx, md) == 1 }.then_some(())
-    }
-
-    fn set_rsa_padding(&mut self, pad: c_int) -> Option<()> {
-        unsafe { EVP_PKEY_CTX_set_rsa_padding(self.pkey_ctx, pad) == 1 }.then_some(())
-    }
-
-    fn set_pss_saltlen(&mut self, saltlen: c_int) -> Option<()> {
-        unsafe { EVP_PKEY_CTX_set_rsa_pss_saltlen(self.pkey_ctx, saltlen) == 1 }.then_some(())
-    }
-
-    fn sign(self, data: &[u8]) -> Result<Vec<u8>, ()> {
-        // determine length
-        let mut max_len = 0;
-        match unsafe {
-            EVP_DigestSign(
-                self.md_ctx,
-                ptr::null_mut(),
-                &mut max_len,
-                data.as_ptr(),
-                data.len(),
-            )
-        } {
-            1 => {}
-            _ => return Err(()),
-        };
-
-        // do the signature
-        let mut out = vec![0u8; max_len];
-        let mut actual_len = max_len;
-
-        match unsafe {
-            EVP_DigestSign(
-                self.md_ctx,
-                out.as_mut_ptr(),
-                &mut actual_len,
-                data.as_ptr(),
-                data.len(),
-            )
-        } {
-            1 => {}
-            _ => return Err(()),
-        }
-
-        out.truncate(actual_len);
-        Ok(out)
-    }
-}
-
-impl Drop for SignCtx {
-    fn drop(&mut self) {
-        unsafe { EVP_MD_CTX_free(self.md_ctx) };
-    }
-}
-
-extern "C" {
-    pub fn EVP_PKEY_is_a(pkey: *const EVP_PKEY, name: *const c_char) -> c_int;
-}
-
-#[cfg(all(test, not(miri)))]
-mod tests {
-    use super::*;
-    use std::io::Cursor;
-
-    use rustls::pki_types::pem::PemObject;
-    use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-
-    #[test]
-    fn supports_rsaencryption_keys() {
-        let der =
-            PrivateKeyDer::from_pem_reader(&mut &include_bytes!("../test-ca/rsa/server.key")[..])
-                .unwrap();
-        let key = EvpPkey::new_from_der_bytes(der).unwrap();
-        println!("{key:?}");
-        assert_eq!(key.algorithm(), rustls::SignatureAlgorithm::RSA);
-        assert_eq!(
-            key.sign(rsa_pkcs1_sha256().as_ref(), b"hello")
-                .unwrap()
-                .len(),
-            256
-        );
-        assert_eq!(
-            key.sign(rsa_pkcs1_sha384().as_ref(), b"hello")
-                .unwrap()
-                .len(),
-            256
-        );
-        assert_eq!(
-            key.sign(rsa_pkcs1_sha512().as_ref(), b"hello")
-                .unwrap()
-                .len(),
-            256
-        );
-        assert_eq!(
-            key.sign(rsa_pss_sha256().as_ref(), b"hello").unwrap().len(),
-            256
-        );
-        assert_eq!(
-            key.sign(rsa_pss_sha384().as_ref(), b"hello").unwrap().len(),
-            256
-        );
-        assert_eq!(
-            key.sign(rsa_pss_sha512().as_ref(), b"hello").unwrap().len(),
-            256
-        );
-    }
-
-    #[test]
-    fn pkey_spki() {
-        for (key_path, cert_path) in &[
-            ("test-ca/rsa/server.key", "test-ca/rsa/server.cert"),
-            (
-                "test-ca/ecdsa-p256/server.key",
-                "test-ca/ecdsa-p256/server.cert",
-            ),
-            (
-                "test-ca/ecdsa-p384/server.key",
-                "test-ca/ecdsa-p384/server.cert",
-            ),
-            (
-                "test-ca/ecdsa-p521/server.key",
-                "test-ca/ecdsa-p521/server.cert",
-            ),
-            ("test-ca/ed25519/server.key", "test-ca/ed25519/server.cert"),
-        ] {
-            let key_der = std::fs::read(key_path).unwrap();
-            let cert_der = std::fs::read(cert_path).unwrap();
-
-            let key_der = PrivateKeyDer::from_pem_reader(&mut Cursor::new(&key_der)).unwrap();
-            let key = EvpPkey::new_from_der_bytes(key_der).unwrap();
-
-            let cert_der = CertificateDer::from_pem_reader(&mut Cursor::new(cert_der)).unwrap();
-            let parsed_cert = rustls::server::ParsedCertificate::try_from(&cert_der).unwrap();
-
-            let cert_spki = parsed_cert.subject_public_key_info();
-            let key_spki = key.subject_public_key_info();
-            assert_eq!(&key_spki, cert_spki.as_ref());
+            old_key => {
+                self.inner_key = old_key;
+                Err(Error::not_supported("Not a decaps key"))
+            }
         }
     }
+
+    pub fn is_a(&self, which: &str) -> bool {
+        let Ok(key) = self.get_signing_key()
+        else { return false; };
+        name_to_sig_alg(which)
+            .map(|alg| key.algorithm() == alg)
+            .unwrap_or(false)
+    }
+}
+
+impl From<Arc<dyn SigningKey>> for EvpPkey{
+    fn from(value: Arc<dyn SigningKey>) -> Self {
+        Self { inner_key: KeyType::SigningKey(value), attributes: Attributes::new(), scheme: Scheme::Unknown }
+    }
+    
+}
+
+#[derive(Default)]
+pub struct EvpPkeyCtx {
+    pkey: Option<Arc<NotThreadSafe<EvpPkey>>>,
+    peer_key: Option<Arc<NotThreadSafe<EvpPkey>>>,
+}
+
+impl EvpPkeyCtx {
+    pub fn new() -> Self{
+        Self::default()
+    }
+
+    pub fn get_pkey(&self) -> Option<Arc<NotThreadSafe<EvpPkey>>> {
+        self.pkey.as_ref().map(|key| key.clone())
+    }
+
+    pub fn get_peer_key(&self) -> Option<Arc<NotThreadSafe<EvpPkey>>> {
+        self.peer_key.as_ref().map(|key| key.clone())
+    }
+
+    pub fn set_pkey(&mut self, pkey: Arc<NotThreadSafe<EvpPkey>>) {
+        self.pkey = Some(pkey);
+    }
+
+    pub fn set_peer_pkey(&mut self, peer: Arc<NotThreadSafe<EvpPkey>>) -> Result<(), Error> {
+        let peer_key = peer.get();
+
+        let has_public_share = peer_key.get_public_share().is_ok();
+        let has_encaps_key = peer_key.get_encaps_key().is_ok();
+
+        if has_public_share && has_encaps_key {
+            Ok(())
+        } else {
+            Err(Error::not_supported("Not a public key"))
+        }
+    }
+}
+
+impl From<Arc<NotThreadSafe<EvpPkey>>> for EvpPkeyCtx{
+    fn from(pkey: Arc<NotThreadSafe<EvpPkey>>) -> Self {
+        Self { pkey: Some(pkey), peer_key: None}
+    }
+    
 }

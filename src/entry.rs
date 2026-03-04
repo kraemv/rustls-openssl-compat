@@ -11,11 +11,7 @@ use std::sync::OnceLock;
 use std::{fs, path::PathBuf};
 
 use openssl_sys::{
-    stack_st_SSL_CIPHER, stack_st_X509, stack_st_X509_NAME, stack_st_void, NID_undef,
-    OPENSSL_malloc, TLSEXT_NAMETYPE_host_name, BIGNUM, EVP_CIPHER_CTX, EVP_PKEY, HMAC_CTX,
-    OPENSSL_NPN_NEGOTIATED, OPENSSL_NPN_NO_OVERLAP, SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER,
-    SSL_MODE_AUTO_RETRY, SSL_MODE_ENABLE_PARTIAL_WRITE, SSL_MODE_RELEASE_BUFFERS, X509, X509_STORE,
-    X509_STORE_CTX,
+    BIGNUM, EVP_CIPHER_CTX, EVP_MD, HMAC_CTX, NID_undef, OPENSSL_NPN_NEGOTIATED, OPENSSL_NPN_NO_OVERLAP, OPENSSL_malloc, OSSL_PARAM, SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER, SSL_MODE_AUTO_RETRY, SSL_MODE_ENABLE_PARTIAL_WRITE, SSL_MODE_RELEASE_BUFFERS, TLSEXT_NAMETYPE_host_name, X509, X509_STORE, X509_STORE_CTX, stack_st_SSL_CIPHER, stack_st_X509, stack_st_X509_NAME, stack_st_void
 };
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
@@ -24,12 +20,10 @@ use crate::bio::{Bio, BIO, BIO_METHOD};
 use crate::callbacks::SslCallbackContext;
 use crate::constants::{named_group_to_nid, named_group_to_tls_name, sig_scheme_to_type_nid};
 use crate::error::{ffi_panic_boundary, Error, MysteriouslyOppositeReturnValue};
-use crate::evp_pkey::EvpPkey;
+use crate::evp_pkey::{EvpPkey, EvpPkeyCtx, Scheme};
 use crate::ex_data::ExData;
 use crate::ffi::{
-    clone_arc, free_arc, free_arc_into_inner, free_box, str_from_cstring, string_from_cstring,
-    to_arc_mut_ptr, to_boxed_mut_ptr, try_clone_arc, try_from, try_mut_slice_int, try_ref_from_ptr,
-    try_slice, try_slice_int, try_str, Castable, OwnershipArc, OwnershipBox, OwnershipRef,
+    self, Castable, OwnershipArc, OwnershipBox, OwnershipRef, clone_arc, free_arc, free_arc_into_inner, free_box, str_from_cstring, string_from_cstring, to_arc_mut_ptr, to_boxed_mut_ptr, try_clone_arc, try_from, try_mut_slice_int, try_ref_from_ptr, try_slice, try_slice_int, try_str
 };
 use crate::not_thread_safe::NotThreadSafe;
 use crate::sign::OpenSslCertifiedKey;
@@ -103,6 +97,258 @@ entry! {
 entry! {
     pub fn _ERR_load_SSL_strings() -> c_int {
         C_INT_SUCCESS
+    }
+}
+
+type EVP_PKEY = EvpPkey;
+type EVP_PKEY_CTX = EvpPkeyCtx;
+
+impl Castable for EVP_PKEY {
+    type Ownership = OwnershipArc;
+    type RustType = NotThreadSafe<Self>;
+}
+
+impl Castable for EVP_PKEY_CTX {
+    type Ownership = OwnershipBox;
+    type RustType = NotThreadSafe<Self>;
+}
+
+entry! {
+    pub fn _EVP_PKEY_new() -> *mut EVP_PKEY {
+        let out: *mut EVP_PKEY = to_arc_mut_ptr(NotThreadSafe::new(EvpPkey::new()));
+        // safety: we just made this object, the pointer must be valid
+        out
+    }
+}
+
+entry! {
+    pub fn _EVP_PKEY_up_ref(key: *mut EVP_PKEY) -> c_int {
+        let key = try_clone_arc!(key);
+        mem::forget(key.clone());
+        C_INT_SUCCESS
+    }
+}
+
+/*entry! {
+    pub fn _EVP_PKEY_dup(key: *mut EVP_PKEY) -> *mut EVP_PKEY{
+        free_arc(key)
+    }
+}*/
+
+entry! {
+    pub fn _EVP_PKEY_free(key: *mut EVP_PKEY) {
+        free_arc(key)
+    }
+}
+
+entry! {
+    pub fn _EVP_PKEY_can_sign(key: *mut EVP_PKEY) -> c_int {
+        try_clone_arc!(key).get().is_signing_key() as i32
+    }
+}
+
+entry! {
+    pub fn _EVP_PKEY_get0_description(key: *mut EVP_PKEY) -> *const c_char {
+        try_clone_arc!(key).get().get_description()
+    }
+}
+
+entry! {
+    pub fn _EVP_PKEY_get_attr_count(key: *mut EVP_PKEY) -> c_int{
+        try_clone_arc!(key).get().get_attributes().len().try_into().unwrap_or(0)
+    }
+}
+
+entry! {
+    pub fn _EVP_PKEY_get_base_id(key: *mut EVP_PKEY) -> c_int {
+        try_clone_arc!(key).get().get_base_id()
+    }
+}
+
+entry! {
+    pub fn _EVP_PKEY_get_id(key: *mut EVP_PKEY) -> c_int {
+        try_clone_arc!(key).get().get_id()
+    }
+}
+
+
+entry! {
+    pub fn _EVP_PKEY_get_size(key: *mut EVP_PKEY) -> c_int{
+        try_clone_arc!(key).get().get_size()
+    }
+
+}
+
+entry! {
+    pub fn _EVP_PKEY_get_bits(key: *mut EVP_PKEY) -> c_int{
+        try_clone_arc!(key).get().get_bits()
+    }
+
+}
+
+entry! {
+    pub fn _EVP_PKEY_get_security_bits(key: *mut EVP_PKEY) -> c_int{
+        try_clone_arc!(key).get().get_security_bits()
+    }
+
+}
+
+entry! {
+    pub fn _EVP_PKEY_is_a(key: *mut EVP_PKEY, name: *const c_char) -> c_int {
+        try_clone_arc!(key).get().is_a(try_str!(name)).into()
+    }
+}
+ 
+entry! {
+    pub fn _EVP_PKEY_decapsulate(key: *mut EVP_PKEY_CTX, unwrapped: *mut c_uchar, unwrappedlen: *mut c_long, wrapped: *const c_uchar, wrappedlen: c_long) -> c_int {
+        let Some(key) = try_ref_from_ptr!(key).get_mut().get_pkey() else {return -1};
+        let Ok(key) = key.get_mut().take_decaps_key() else {return -2};
+        let wrapped = try_slice!(wrapped, wrappedlen as usize);
+        let Ok(key) = key.complete(wrapped) else { return 0 };
+
+        let secret_key = key.secret_bytes();
+        let Ok(secret_key_len): Result<i64, std::num::TryFromIntError> = secret_key.len().try_into() else { return 0 };
+
+        unsafe {
+            if !unwrapped.is_null() && *unwrappedlen == secret_key_len {
+                ptr::copy(secret_key.as_ptr(), unwrapped, secret_key_len as usize);
+            }
+            if !unwrappedlen.is_null() {
+                unwrappedlen.write(secret_key_len);
+            }
+        }
+        1
+    }
+}
+
+entry! {
+    pub fn _EVP_PKEY_derive(ctx: *mut EVP_PKEY_CTX, key: *mut c_uchar, keylen: *mut c_long) -> c_int {
+        let ctx = try_ref_from_ptr!(ctx).get();
+        let Some(private_key) = ctx.get_pkey() else {return -1};
+        let Ok(private_key) = private_key.get().get_private_share() else {return -2};
+        let Some(public_key) = ctx.get_peer_key() else {return -1};
+        let Ok(public_key) = public_key.get().get_public_share() else {return -2};
+
+        let Ok(secret_key) = private_key.start_and_complete(public_key.pub_key()) else { return 0 };
+
+        let secret_key = secret_key.secret.secret_bytes();
+        let Ok(secret_key_len): Result<i64, std::num::TryFromIntError> = secret_key.len().try_into() else { return 0 };
+
+        unsafe {
+            if !key.is_null() && *keylen == secret_key_len {
+                ptr::copy(secret_key.as_ptr(), key, secret_key_len as usize);
+            }
+            if !keylen.is_null() {
+                keylen.write(secret_key_len);
+            }
+        }
+        1
+    }
+}
+
+entry! {
+    pub fn _EVP_PKEY_derive_set_peer(ctx: *mut EVP_PKEY_CTX, peer: *mut EVP_PKEY) -> c_int {
+        let Some(ctx) = ffi::to_box(ctx) else { return 0;};
+        let pkey = try_clone_arc!(peer);
+        ctx.get_mut().set_peer_pkey(pkey).map(|_| 1).unwrap_or(0)
+    }
+}
+entry! {
+    pub fn _EVP_PKEY_encapsulate(key: *mut EVP_PKEY_CTX, wrappedkey: *mut c_uchar, wrappedkeylen: *mut c_long, genkey: *mut c_uchar, genkeylen: *mut c_long) -> c_int {
+        let Some(key) = try_ref_from_ptr!(key).get().get_peer_key() else {return -1};
+        let Ok((group, key)) = key.get().get_encaps_key() else {return -2};
+        let Ok(secret_key) = group.start_and_complete(key) else {return -1;};
+
+        let ct = secret_key.pub_key;
+        let secret_key = secret_key.secret.secret_bytes();
+        let Ok(secret_key_len): Result<i64, std::num::TryFromIntError> = secret_key.len().try_into() else { return 0 };
+        let Ok(wrapped_key_len): Result<i64, std::num::TryFromIntError> = ct.len().try_into() else { return 0 };
+
+        unsafe {
+            if !wrappedkey.is_null() && *wrappedkeylen == wrapped_key_len {
+                ptr::copy(ct.as_ptr(), wrappedkey, wrapped_key_len as usize);
+            }
+            if !genkey.is_null() && *genkeylen == secret_key_len {
+                ptr::copy(secret_key.as_ptr(), genkey, secret_key_len as usize);
+            }
+            if !wrappedkeylen.is_null() {
+                wrappedkeylen.write(wrapped_key_len);
+            }
+            if !genkeylen.is_null() {
+                genkeylen.write(secret_key_len);
+            }
+        }
+        1
+    }
+}
+
+entry! {
+    pub fn _EVP_PKEY_sign(key: *mut EVP_PKEY_CTX, sig: *mut c_uchar, siglen: *mut c_long, tbs: *const c_uchar, tbslen: c_long) -> c_int {
+        let Some(key) = try_ref_from_ptr!(key).get().get_pkey() else {return -1};
+        let Ok(sig_key) = key.get().get_signing_key() else {return -2};
+        let message = try_slice!(tbs, tbslen as usize);
+        
+        let Scheme::SignatureScheme(scheme) = key.get().get_scheme() else { return -1};
+        let Some(sig_vec) = sig_key.choose_scheme(&[scheme]).and_then(|signer| signer.sign(message).ok()) else {return -1};
+        let Ok(sig_len): Result<i64, std::num::TryFromIntError> = sig_vec.len().try_into() else { return 0 };
+        unsafe {
+            if !sig.is_null() && *siglen == sig_len {
+                ptr::copy(sig_vec.as_ptr(), sig, sig_len as usize);
+            }
+            if !siglen.is_null() {
+                siglen.write(sig_len);
+            }
+        }
+        1
+    }
+}
+
+entry! {
+    pub fn _EVP_PKEY_verify(key: *mut EVP_PKEY_CTX, sig: *const c_uchar, siglen: c_long, tbs: *const c_uchar, tbslen: c_long) -> c_int {
+        let Some(key) = try_ref_from_ptr!(key).get().get_pkey() else {return -1};
+        let Ok((alg, key)) = key.get().get_verify_key() else {return -2};
+        let message = try_slice!(tbs, tbslen as usize);
+        let signature = try_slice!(tbs, siglen as usize);
+        
+        alg.verify_signature(key, message, signature).map(|_| 1).unwrap_or(0)
+    }
+}
+
+entry! {
+    pub fn _EVP_PKEY_CTX_new(pkey: *mut EVP_PKEY, _e: *mut c_void) -> *mut EVP_PKEY_CTX {
+        let pkey = try_clone_arc!(pkey);
+        let mut ctx = EvpPkeyCtx::new();
+        ctx.set_pkey(pkey);
+        to_boxed_mut_ptr(NotThreadSafe::new(ctx))
+    }
+}
+
+entry! {
+    pub fn _EVP_PKEY_CTX_free(ctx: *mut EVP_PKEY_CTX) {
+        free_box(ctx);
+    }
+}
+
+entry! {
+    pub fn _EVP_PKEY_CTX_is_a(ctx: *mut EVP_PKEY_CTX, keytype: *const c_char) -> c_int{
+        let Some(key) = try_ref_from_ptr!(ctx).get().get_pkey() else {return 0};
+        key.get().is_a(try_str!(keytype)).into()
+    }
+}
+
+entry! {
+    pub fn _PEM_read_bio_PrivateKey(
+        bp: *mut BIO,
+        x: *mut *mut EVP_PKEY,
+        cb: pem_password_cb,
+        u: *const c_char,
+    ) -> *mut EVP_PKEY {
+        let key = crate::read_pem_key(Bio::new_pair(Some(bp), Some(bp)), &[]);
+        let key = to_arc_mut_ptr(NotThreadSafe::new(key));
+        unsafe {
+            ptr::write(x, key);
+        }
+        key
     }
 }
 
@@ -605,6 +851,8 @@ entry! {
             }
         };
 
+        let key = Arc::new(NotThreadSafe::new(key));
+
         match ctx.get_mut().commit_private_key(key) {
             Err(e) => e.raise().into(),
             Ok(()) => C_INT_SUCCESS,
@@ -615,12 +863,7 @@ entry! {
 entry! {
     pub fn _SSL_CTX_use_PrivateKey(ctx: *mut SSL_CTX, pkey: *mut EVP_PKEY) -> c_int {
         let ctx = try_clone_arc!(ctx);
-
-        if pkey.is_null() {
-            return Error::null_pointer().raise().into();
-        }
-
-        let pkey = EvpPkey::new_incref(pkey);
+        let pkey = try_clone_arc!(pkey);
 
         match ctx.get_mut().commit_private_key(pkey) {
             Err(e) => e.raise().into(),
@@ -1582,12 +1825,7 @@ entry! {
 entry! {
     pub fn _SSL_use_PrivateKey(ssl: *mut SSL, pkey: *mut EVP_PKEY) -> c_int {
         let ssl = try_clone_arc!(ssl);
-
-        if pkey.is_null() {
-            return Error::null_pointer().raise().into();
-        }
-
-        let pkey = EvpPkey::new_incref(pkey);
+        let pkey = try_clone_arc!(pkey);
 
         match ssl.get_mut().commit_private_key(pkey) {
             Err(e) => e.raise().into(),
@@ -1611,6 +1849,8 @@ entry! {
                 return err.raise().into();
             }
         };
+
+        let key = Arc::new(NotThreadSafe::new(key));
 
         match ssl.get_mut().commit_private_key(key) {
             Err(e) => e.raise().into(),
@@ -2144,10 +2384,12 @@ entry! {
             return 0;
         }
 
+        let pkey = try_clone_arc!(pkey);
+
         let chain = vec![CertificateDer::from(
             OwnedX509::new_incref(cert).der_bytes(),
         )];
-        let Ok(certified_key) = OpenSslCertifiedKey::new(chain, EvpPkey::new_incref(pkey)) else {
+        let Ok(certified_key) = OpenSslCertifiedKey::new(chain, pkey.clone()) else {
             return 0;
         };
 
@@ -2250,6 +2492,106 @@ macro_rules! entry_stub {
 
 // things we support and should be able to implement to
 // some extent:
+
+entry_stub! {
+    pub fn _EVP_PKEY_CTX_new_id(_id: c_int, _e: *mut c_void) -> *mut EVP_PKEY_CTX;
+}
+
+entry_stub! {
+    pub fn _EVP_PKEY_CTX_set_hkdf_mode(pctx: *mut EVP_PKEY_CTX, mode: c_int) -> c_int;
+}
+
+entry_stub! {
+    pub fn _EVP_PKEY_CTX_set_hkdf_md(pctx: *mut EVP_PKEY_CTX, md: *const EVP_MD) -> c_int;
+}
+
+entry_stub! {
+    pub fn _EVP_PKEY_CTX_set1_hkdf_key(pctx: *mut EVP_PKEY_CTX, key: *mut c_uchar, keylen: c_int) -> c_int;
+}
+
+entry_stub! {
+    pub fn _EVP_PKEY_CTX_add1_hkdf_info(pctx: *mut EVP_PKEY_CTX, info: *mut c_uchar, infolen: c_int) -> c_int;
+}
+
+entry_stub! {
+    pub fn _EVP_PKEY_generate(ctx: *mut EVP_PKEY_CTX, ppkey: *mut *mut EVP_PKEY) -> c_int;
+}
+
+entry_stub! {
+    pub fn _EVP_PKEY_derive_init(ctx: *mut EVP_PKEY_CTX) -> c_int;
+}
+
+entry_stub! {
+    pub fn _EVP_PKEY_decapsulate_init(ctx: *mut EVP_PKEY_CTX, params: *const OSSL_PARAM) -> c_int;
+}
+
+entry_stub! {
+    pub fn _EVP_PKEY_encapsulate_init(ctx: *mut EVP_PKEY_CTX, params: *const OSSL_PARAM) -> c_int;
+}
+
+entry_stub! {
+    pub fn _EVP_PKEY_sign_init(ctx: *mut EVP_PKEY_CTX) -> c_int;
+}
+
+entry_stub! {
+    pub fn _EVP_PKEY_verify_init(ctx: *mut EVP_PKEY_CTX) -> c_int;
+}
+
+entry_stub! {
+    pub fn _EVP_PKEY_get_bn_param(pkey: *const EVP_PKEY, key_name: *const c_char, bn: *mut *mut BIGNUM) -> c_int;
+}
+
+entry_stub! {
+    pub fn _EVP_PKEY_get_int_param(pkey: *const EVP_PKEY, key_name: *const c_char, out: *mut c_int) -> c_int;
+}
+
+entry_stub! {
+    pub fn _EVP_PKEY_get_octet_string_param(pkey: *const EVP_PKEY, key_name: *const c_char, buf: *mut c_uchar, max_buf_sz: c_long, out_len: *mut c_long) -> c_int;
+}
+
+entry_stub! {
+    pub fn _EVP_PKEY_get_params(pkey: *const EVP_PKEY, params: *mut OSSL_PARAM) -> c_int;
+}
+
+entry_stub! {
+    pub fn _EVP_PKEY_get_size_t_param(pkey: *const EVP_PKEY, key_name: *const c_char, out: *mut c_long) -> c_int;
+}
+
+entry_stub! {
+    pub fn _EVP_PKEY_get_utf8_string_param(pkey: *const EVP_PKEY, key_name: *const c_char, str: *mut c_char, max_buf_sz: c_long, out_len: *mut c_long) -> c_int;
+}
+
+entry_stub! {
+    pub fn _EVP_PKEY_gettable_params(pkey: *const EVP_PKEY) -> *const OSSL_PARAM;
+}
+
+entry_stub! {
+    pub fn _EVP_PKEY_set_bn_param(pkey: *const EVP_PKEY, key_name: *const c_char, bn: *const BIGNUM) -> c_int;
+}
+
+entry_stub! {
+    pub fn _EVP_PKEY_set_int_param(pkey: *const EVP_PKEY, key_name: *const c_char, in_: c_int) -> c_int;
+}
+
+entry_stub! {
+    pub fn _EVP_PKEY_set_octet_string_param(pkey: *const EVP_PKEY, key_name: *const c_char, buf: *const c_uchar, bsize: c_long) -> c_int;
+}
+
+entry_stub! {
+    pub fn _EVP_PKEY_set_params(pkey: *const EVP_PKEY, params: *mut OSSL_PARAM) -> c_int;
+}
+
+entry_stub! {
+    pub fn _EVP_PKEY_set_size_t_param(pkey: *const EVP_PKEY, key_name: *const c_char, in_: c_long) -> c_int;
+}
+
+entry_stub! {
+    pub fn _EVP_PKEY_set_utf8_string_param(pkey: *const EVP_PKEY, key_name: *const c_char, str: *mut c_char, bsize: c_long) -> c_int;
+}
+
+entry_stub! {
+    pub fn _EVP_PKEY_settable_params(pkey: *const EVP_PKEY) -> *const OSSL_PARAM;
+}
 
 entry_stub! {
     pub fn _SSL_get_ex_data_X509_STORE_CTX_idx() -> c_int;
