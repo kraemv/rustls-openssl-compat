@@ -199,6 +199,8 @@ impl SslConfigCtx {
         };
         let key = use_private_key_file(path, FILETYPE_PEM)?;
 
+        let key = Arc::new(NotThreadSafe::new(key));
+
         match &self.state {
             State::Validating => Ok(ActionResult::Applied),
             State::ApplyingToCtx(ctx) => {

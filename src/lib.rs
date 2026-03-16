@@ -8,24 +8,27 @@ use std::sync::Arc;
 
 use openssl_probe::ProbeResult;
 use openssl_sys::{
-    EVP_PKEY, SSL_ERROR_NONE, SSL_ERROR_SSL, SSL_ERROR_WANT_READ, SSL_ERROR_WANT_WRITE, X509,
-    X509_STORE, X509_V_ERR_UNSPECIFIED,
+    SSL_ERROR_NONE, SSL_ERROR_SSL, SSL_ERROR_WANT_READ, SSL_ERROR_WANT_WRITE, X509, X509_STORE,
+    X509_V_ERR_UNSPECIFIED,
 };
 
 // use rustls::crypto::aws_lc_rs as provider;
-use rustls_libcrux_provider as provider;
-use rustls::crypto::aws_lc_rs::Ticketer;
 use rustls::client::Resumption;
+use rustls::crypto::aws_lc_rs::Ticketer;
 use rustls::crypto::SupportedKxGroup;
-use rustls::pki_types::{CertificateDer, ServerName};
+use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
 use rustls::server::{Accepted, Acceptor, ProducesTickets};
 use rustls::{
     AlertDescription, CipherSuite, ClientConfig, ClientConnection, Connection, HandshakeKind,
     ProtocolVersion, ServerConfig, SignatureScheme, SupportedProtocolVersion,
 };
+use rustls_libcrux_provider as provider;
 
 use not_thread_safe::NotThreadSafe;
 use x509::OwnedX509Store;
+
+use crate::evp_pkey::EvpPkey;
 
 mod bio;
 mod cache;
@@ -134,16 +137,16 @@ impl SslCipher {
             _ => None,
         }
     }
-    
+
     pub fn protocol_id(&self) -> u16 {
         u16::from(self.rustls)
     }
-    
+
     pub fn openssl_id(&self) -> u32 {
         0x03000000u32 | (self.protocol_id() as u32)
     }
 }
-    
+
 static TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256: SslCipher = SslCipher {
     auth: constants::NID_AUTH_ECDSA,
     kx: constants::NID_KX_ECDHE,
@@ -726,15 +729,15 @@ impl SslContext {
         self.auth_keys.stage_certificate_chain_tail(chain)
     }
 
-    fn commit_private_key(&mut self, key: evp_pkey::EvpPkey) -> Result<(), error::Error> {
-        self.auth_keys.commit_private_key(key)
+    fn commit_private_key(&mut self, key: Arc<NotThreadSafe<EvpPkey>>) -> Result<(), error::Error> {
+        self.auth_keys.commit_private_key(key.clone(), key.get())
     }
 
     fn get_certificate(&self) -> *mut X509 {
         self.auth_keys.borrow_current_cert()
     }
 
-    fn get_privatekey(&self) -> *mut EVP_PKEY {
+    fn get_privatekey(&self) -> *mut EvpPkey {
         self.auth_keys.borrow_current_key()
     }
 
@@ -745,6 +748,19 @@ impl SslContext {
     fn set_servername_callback_context(&mut self, context: *mut c_void) {
         self.servername_callback.context = context;
     }
+}
+
+pub fn read_pem_key(bp: &mut bio::Bio, _pw: &[u8]) -> Result<EvpPkey, error::Error> {
+    let mut key_buf = vec![];
+
+    let mut buf: [u8; 32] = [0u8; 32];
+    let mut len = 32;
+    while len == 32 {
+        len = bp.read(&mut buf).map_err(error::Error::from_io)?;
+        key_buf.extend_from_slice(&buf[..len]);
+    }
+    let der = PrivateKeyDer::from_pem_slice(&key_buf).map_err(error::Error::from_pem)?;
+    EvpPkey::new_from_private_der_bytes(der)
 }
 
 /// Parse the ALPN wire format (which is used in the openssl API)
@@ -999,8 +1015,8 @@ impl Ssl {
         self.auth_keys.stage_certificate_chain_tail(chain)
     }
 
-    fn commit_private_key(&mut self, key: evp_pkey::EvpPkey) -> Result<(), error::Error> {
-        self.auth_keys.commit_private_key(key)
+    fn commit_private_key(&mut self, key: Arc<NotThreadSafe<EvpPkey>>) -> Result<(), error::Error> {
+        self.auth_keys.commit_private_key(key.clone(), key.get())
     }
 
     fn set_verify_hostname(&mut self, hostname: Option<&str>) -> bool {
@@ -1578,7 +1594,7 @@ impl Ssl {
         self.auth_keys.borrow_current_cert()
     }
 
-    fn get_privatekey(&self) -> *mut EVP_PKEY {
+    fn get_privatekey(&self) -> *mut EvpPkey {
         self.auth_keys.borrow_current_key()
     }
 

@@ -5,7 +5,13 @@ use openssl_sys::{
 };
 
 use rustls::internal::msgs::enums::AlertLevel;
-use rustls::{AlertDescription, NamedGroup, SignatureScheme};
+use rustls::{AlertDescription, NamedGroup, SignatureAlgorithm, SignatureScheme};
+use x509_cert::AlgorithmIdentifier;
+use x509_cert::der::Any;
+use x509_cert::der::oid::db::{rfc5912::*, rfc8410::*, fips204::*};
+use x509_cert::spki::ObjectIdentifier;
+
+use crate::evp_pkey::Scheme;
 
 pub fn alert_desc_to_long_string(value: c_int) -> &'static CStr {
     match AlertDescription::from(value as u8) {
@@ -120,6 +126,34 @@ pub fn sig_scheme_to_type_nid(scheme: SignatureScheme) -> Option<c_int> {
     }
 }
 
+
+pub fn alg_id_to_sig_alg(id: AlgorithmIdentifier) -> Option<SignatureScheme> {
+    Some(match (id.oid, id.parameters) {
+        (ID_EC_PUBLIC_KEY, Some(params)) => match Any::decode_as::<ObjectIdentifier>(&params).ok()? {
+            SECP_256_R_1 => SignatureScheme::ECDSA_NISTP256_SHA256,
+            SECP_384_R_1 => SignatureScheme::ECDSA_NISTP384_SHA384,
+            SECP_521_R_1 => SignatureScheme::ECDSA_NISTP521_SHA512,
+            _ => return None,
+        }
+        (ID_ED_448, None) => SignatureScheme::ED448,
+        (ID_ED_25519, None) => SignatureScheme::ED25519,
+        (ID_ML_DSA_44, None) => SignatureScheme::ML_DSA_44,
+        (ID_ML_DSA_65, None) => SignatureScheme::ML_DSA_65,
+        (ID_ML_DSA_87, None) => SignatureScheme::ML_DSA_87,
+        (_, _) => return None,
+    })
+}
+pub fn name_to_sig_alg(name: &str) -> Option<SignatureAlgorithm> {
+    Some(match name {
+        "DSA" => SignatureAlgorithm::DSA,
+        "EC" => SignatureAlgorithm::ECDSA,
+        "ED448" => SignatureAlgorithm::ED448,
+        "ED25519" => SignatureAlgorithm::ED25519,
+        "RSA" => SignatureAlgorithm::RSA,
+        _ => return None,
+    })
+}
+
 pub fn named_group_to_tls_name(id: NamedGroup) -> Option<&'static CStr> {
     Some(match id {
         NamedGroup::secp256r1 => c"secp256r1",
@@ -176,6 +210,51 @@ pub fn named_group_to_nid(group: NamedGroup) -> Option<c_int> {
     }
 }
 
+pub fn scheme_to_info(scheme: &Scheme) -> Option<EvpKeyInfo> {
+    match scheme {
+        Scheme::SignatureScheme(SignatureScheme::ECDSA_NISTP256_SHA256) => Some(P256_INFO),
+        _ => None,
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct EvpKeyInfo {
+    bits: i32,
+    description: & 'static CStr,
+    id: i32,
+    security_bits: i32,
+    size: i32,
+}
+
+const P256_INFO: EvpKeyInfo = EvpKeyInfo{
+    bits: 256,
+    description: c"Rustls EC implementation",
+    id: NID_X9_62_id_ecPublicKey,
+    security_bits: 128,
+    size: 72,
+};
+
+impl EvpKeyInfo {
+    pub(crate) fn get_bits(&self) -> c_int {
+        self.bits
+    }
+
+    pub(crate) fn get_description(&self) ->  & 'static CStr {
+        self.description
+    }
+
+    pub(crate) fn get_id(&self) -> c_int {
+        self.id
+    }
+
+    pub(crate) fn get_security_bits(&self) -> c_int {
+        self.security_bits
+    }
+
+    pub(crate) fn get_size(&self) -> c_int {
+        self.size
+    }
+}
 pub(super) const NID_AUTH_ANY: c_int = 1064;
 pub(super) const NID_AUTH_ECDSA: c_int = 1047;
 pub(super) const NID_AUTH_RSA: c_int = 1046;
